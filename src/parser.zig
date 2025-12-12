@@ -348,6 +348,9 @@ pub const Parser = struct {
             if (std.mem.eql(u8, ref_name, "DUP")) {
                 return self.parseBuiltinDUP();
             }
+            if (std.mem.eql(u8, ref_name, "LOG")) {
+                return self.parseBuiltinLOG();
+            }
 
             var args: ArrayList(hvm.Term) = .empty;
             defer args.deinit(self.allocator);
@@ -603,6 +606,19 @@ pub const Parser = struct {
         hvm.set(loc + 2, bod);
 
         return hvm.term_new(hvm.REF, hvm.DUP_F, @truncate(loc));
+    }
+
+    fn parseBuiltinLOG(self: *Parser) ParseError!hvm.Term {
+        try self.consume('(');
+        const val = try self.term();
+        const cont = try self.term();
+        try self.consume(')');
+
+        const loc = hvm.alloc_node(2);
+        hvm.set(loc, val);
+        hvm.set(loc + 1, cont);
+
+        return hvm.term_new(hvm.REF, hvm.LOG_F, @truncate(loc));
     }
 
     // Parse a function definition: @name(params) = body

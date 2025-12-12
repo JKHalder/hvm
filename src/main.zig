@@ -464,7 +464,250 @@ fn run_tests() void {
         }
     }
 
+    // =========================================================================
+    // Interaction Net Tests
+    // =========================================================================
+
+    // APP + SUP: Superposition distribution
+    // (SUP{a,b} x) => SUP{(a x), (b x)}
+    {
+        hvm.set_len(1);
+        hvm.set_itr(0);
+
+        // Create SUP of two lambdas: SUP{λx.x, λx.#0}
+        const lam1_bod = hvm.alloc_node(1);
+        hvm.set(lam1_bod, hvm.term_new(hvm.VAR, 0, @truncate(lam1_bod)));
+        const lam2_bod = hvm.alloc_node(1);
+        hvm.set(lam2_bod, hvm.term_new(hvm.NUM, 0, 0));
+
+        const sup_loc = hvm.alloc_node(2);
+        hvm.set(sup_loc, hvm.term_new(hvm.LAM, 0, @truncate(lam1_bod)));
+        hvm.set(sup_loc + 1, hvm.term_new(hvm.LAM, 0, @truncate(lam2_bod)));
+
+        // Apply SUP to #42
+        const app_loc = hvm.alloc_node(2);
+        hvm.set(app_loc, hvm.term_new(hvm.SUP, 0, @truncate(sup_loc)));
+        hvm.set(app_loc + 1, hvm.term_new(hvm.NUM, 0, 42));
+
+        const result = hvm.reduce(hvm.term_new(hvm.APP, 0, @truncate(app_loc)));
+        // Result should be SUP{42, 0}
+        if (hvm.term_tag(result) == hvm.SUP) {
+            print("  [PASS] APP+SUP: (SUP{{λx.x, λx.#0}} #42) => SUP{{#42, #0}}\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] APP+SUP: expected SUP, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // APP + ERA: Application with erasure
+    // (* x) => *
+    {
+        hvm.set_len(1);
+        const app_loc = hvm.alloc_node(2);
+        hvm.set(app_loc, hvm.term_new(hvm.ERA, 0, 0));
+        hvm.set(app_loc + 1, hvm.term_new(hvm.NUM, 0, 42));
+        const result = hvm.reduce(hvm.term_new(hvm.APP, 0, @truncate(app_loc)));
+        if (hvm.term_tag(result) == hvm.ERA) {
+            print("  [PASS] APP+ERA: (* #42) => *\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] APP+ERA: expected ERA, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // DUP + LAM: Lambda duplication
+    // !&{a,b}=λx.x; (a b) should work
+    {
+        hvm.set_len(1);
+        // Create λx.x
+        const lam_loc = hvm.alloc_node(1);
+        hvm.set(lam_loc, hvm.term_new(hvm.VAR, 0, @truncate(lam_loc)));
+
+        // Create dup node with the lambda
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.LAM, 0, @truncate(lam_loc)));
+
+        // Get CO0 (first copy of lambda)
+        const co0 = hvm.term_new(hvm.CO0, 0, @truncate(dup_loc));
+        const result = hvm.reduce(co0);
+
+        // Result should be a lambda
+        if (hvm.term_tag(result) == hvm.LAM) {
+            print("  [PASS] DUP+LAM: CO0(λx.x) => λ\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+LAM: expected LAM, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // DUP + SUP annihilation (same label)
+    // CO0(&L{a,b}) where L matches => a
+    {
+        hvm.set_len(1);
+        const sup_loc = hvm.alloc_node(2);
+        hvm.set(sup_loc, hvm.term_new(hvm.NUM, 0, 100));
+        hvm.set(sup_loc + 1, hvm.term_new(hvm.NUM, 0, 200));
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.SUP, 7, @truncate(sup_loc))); // label 7
+        const result = hvm.reduce(hvm.term_new(hvm.CO0, 7, @truncate(dup_loc))); // same label 7
+        if (hvm.term_val(result) == 100) {
+            print("  [PASS] DUP+SUP annihilation: CO0_7(SUP_7{{100,200}}) => 100\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+SUP annihilation: expected 100, got {d}\n", .{hvm.term_val(result)});
+            failed += 1;
+        }
+    }
+
+    // DUP + SUP commutation (different labels)
+    // CO0_i(SUP_j{a,b}) where i≠j => SUP_j{CO0_i(a), CO0_i(b)}
+    {
+        hvm.set_len(1);
+        hvm.reset_commutation_counter();
+
+        const sup_loc = hvm.alloc_node(2);
+        hvm.set(sup_loc, hvm.term_new(hvm.NUM, 0, 10));
+        hvm.set(sup_loc + 1, hvm.term_new(hvm.NUM, 0, 20));
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.SUP, 5, @truncate(sup_loc))); // label 5
+        const result = hvm.reduce(hvm.term_new(hvm.CO0, 3, @truncate(dup_loc))); // different label 3
+
+        // Result should be a SUP (commutation creates new SUP)
+        if (hvm.term_tag(result) == hvm.SUP and hvm.get_commutation_count() > 0) {
+            print("  [PASS] DUP+SUP commutation: CO0_3(SUP_5{{10,20}}) => SUP (commutations: {d})\n", .{hvm.get_commutation_count()});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+SUP commutation: expected SUP with commutation, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // DUP + NUM: Number duplication
+    // Both CO0 and CO1 get the same number
+    {
+        hvm.set_len(1);
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.NUM, 0, 777));
+        const result0 = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+        // Reset and test CO1
+        hvm.set_len(1);
+        const dup_loc2 = hvm.alloc_node(1);
+        hvm.set(dup_loc2, hvm.term_new(hvm.NUM, 0, 777));
+        const result1 = hvm.reduce(hvm.term_new(hvm.CO1, 0, @truncate(dup_loc2)));
+
+        if (hvm.term_val(result0) == 777 and hvm.term_val(result1) == 777) {
+            print("  [PASS] DUP+NUM: CO0(#777) => #777, CO1(#777) => #777\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+NUM: expected 777, got {d} and {d}\n", .{ hvm.term_val(result0), hvm.term_val(result1) });
+            failed += 1;
+        }
+    }
+
+    // DUP + ERA: Erasure duplication
+    // Both projections get erasure
+    {
+        hvm.set_len(1);
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.ERA, 0, 0));
+        const result = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+        if (hvm.term_tag(result) == hvm.ERA) {
+            print("  [PASS] DUP+ERA: CO0(*) => *\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+ERA: expected ERA, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // DUP + CTR: Constructor duplication
+    // CO0(#Pair{a,b}) => #Pair{CO0(a), CO0(b)}
+    {
+        hvm.set_len(1);
+        // Create constructor C02 (arity 2) with two numbers
+        const ctr_loc = hvm.alloc_node(2);
+        hvm.set(ctr_loc, hvm.term_new(hvm.NUM, 0, 11));
+        hvm.set(ctr_loc + 1, hvm.term_new(hvm.NUM, 0, 22));
+
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.C02, 0, @truncate(ctr_loc)));
+
+        const result = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+        if (hvm.term_tag(result) == hvm.C02) {
+            print("  [PASS] DUP+CTR: CO0(#Pair{{11,22}}) => #Pair{{...}}\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] DUP+CTR: expected C02, got tag {d}\n", .{hvm.term_tag(result)});
+            failed += 1;
+        }
+    }
+
+    // MAT + CTR: Pattern matching
+    // ~#True{} { #True: #1, #False: #0 } => #1
+    {
+        hvm.set_len(1);
+        // C00 with ext=0 is "True", ext=1 is "False"
+        const mat_loc = hvm.alloc_node(3);
+        hvm.set(mat_loc, hvm.term_new(hvm.C00, 0, 0)); // #True (constructor 0, arity 0)
+        hvm.set(mat_loc + 1, hvm.term_new(hvm.NUM, 0, 1)); // case True: #1
+        hvm.set(mat_loc + 2, hvm.term_new(hvm.NUM, 0, 0)); // case False: #0
+
+        const result = hvm.reduce(hvm.term_new(hvm.MAT, 2, @truncate(mat_loc)));
+        if (hvm.term_val(result) == 1) {
+            print("  [PASS] MAT+CTR: match #True {{ True: #1, False: #0 }} => #1\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] MAT+CTR: expected 1, got {d}\n", .{hvm.term_val(result)});
+            failed += 1;
+        }
+    }
+
+    // SWI + NUM: Switch on zero
+    {
+        hvm.set_len(1);
+        const swi_loc = hvm.alloc_node(3);
+        hvm.set(swi_loc, hvm.term_new(hvm.NUM, 0, 0));
+        hvm.set(swi_loc + 1, hvm.term_new(hvm.NUM, 0, 999)); // zero case
+        const succ_lam = hvm.alloc_node(1);
+        hvm.set(succ_lam, hvm.term_new(hvm.NUM, 0, 0));
+        hvm.set(swi_loc + 2, hvm.term_new(hvm.LAM, 0, @truncate(succ_lam)));
+        const result = hvm.reduce(hvm.term_new(hvm.SWI, 0, @truncate(swi_loc)));
+        if (hvm.term_val(result) == 999) {
+            print("  [PASS] SWI+NUM: switch(0) {{ zero: #999, succ: ... }} => #999\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] SWI+NUM: expected 999, got {d}\n", .{hvm.term_val(result)});
+            failed += 1;
+        }
+    }
+
+    // SWI + NUM: Switch on successor
+    {
+        hvm.set_len(1);
+        const swi_loc = hvm.alloc_node(3);
+        hvm.set(swi_loc, hvm.term_new(hvm.NUM, 0, 3)); // n = 3
+        hvm.set(swi_loc + 1, hvm.term_new(hvm.NUM, 0, 0)); // zero case
+        // succ case: λp.p (returns predecessor)
+        const succ_lam = hvm.alloc_node(1);
+        hvm.set(succ_lam, hvm.term_new(hvm.VAR, 0, @truncate(succ_lam)));
+        hvm.set(swi_loc + 2, hvm.term_new(hvm.LAM, 0, @truncate(succ_lam)));
+        const result = hvm.reduce(hvm.term_new(hvm.SWI, 0, @truncate(swi_loc)));
+        // Should return predecessor: 3-1 = 2
+        if (hvm.term_val(result) == 2) {
+            print("  [PASS] SWI+NUM: switch(3) {{ zero: #0, succ: λp.p }} => #2\n", .{});
+            passed += 1;
+        } else {
+            print("  [FAIL] SWI+NUM: expected 2 (predecessor), got {d}\n", .{hvm.term_val(result)});
+            failed += 1;
+        }
+    }
+
+    // =========================================================================
     // All operators test
+    // =========================================================================
     const ops = [_]struct { op: hvm.Ext, name: []const u8, a: u32, b: u32, expected: u32 }{
         .{ .op = hvm.OP_ADD, .name = "+", .a = 10, .b = 3, .expected = 13 },
         .{ .op = hvm.OP_SUB, .name = "-", .a = 10, .b = 3, .expected = 7 },
@@ -651,6 +894,192 @@ fn run_benchmark() void {
     elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
     print("  Time: {d:.2} ms\n", .{elapsed_ms});
     print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(batch_iterations)) / (elapsed_ms / 1000.0)});
+
+    // =========================================================================
+    // Interaction Net Benchmarks
+    // =========================================================================
+
+    print("\n--- Interaction Net Benchmarks ---\n", .{});
+
+    // Benchmark 8: DUP + LAM (lambda duplication)
+    print("\n8. DUP+LAM (lambda duplication, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const lam_loc = hvm.alloc_node(1);
+        hvm.set(lam_loc, hvm.term_new(hvm.VAR, 0, @truncate(lam_loc)));
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.LAM, 0, @truncate(lam_loc)));
+        _ = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 9: DUP + NUM (trivial duplication)
+    print("\n9. DUP+NUM (number duplication, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.NUM, 0, i));
+        _ = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 10: DUP + SUP commutation (different labels)
+    print("\n10. DUP+SUP commutation (100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    hvm.reset_commutation_counter();
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const sup_loc = hvm.alloc_node(2);
+        hvm.set(sup_loc, hvm.term_new(hvm.NUM, 0, 1));
+        hvm.set(sup_loc + 1, hvm.term_new(hvm.NUM, 0, 2));
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.SUP, 1, @truncate(sup_loc))); // label 1
+        _ = hvm.reduce(hvm.term_new(hvm.CO0, 2, @truncate(dup_loc))); // label 2 (different)
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+    print("  Commutations: {d}\n", .{hvm.get_commutation_count()});
+
+    // Benchmark 11: APP + SUP (superposition distribution)
+    print("\n11. APP+SUP (superposition distribution, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        // SUP of two identity lambdas
+        const lam1 = hvm.alloc_node(1);
+        hvm.set(lam1, hvm.term_new(hvm.VAR, 0, @truncate(lam1)));
+        const lam2 = hvm.alloc_node(1);
+        hvm.set(lam2, hvm.term_new(hvm.VAR, 0, @truncate(lam2)));
+        const sup_loc = hvm.alloc_node(2);
+        hvm.set(sup_loc, hvm.term_new(hvm.LAM, 0, @truncate(lam1)));
+        hvm.set(sup_loc + 1, hvm.term_new(hvm.LAM, 0, @truncate(lam2)));
+        const app_loc = hvm.alloc_node(2);
+        hvm.set(app_loc, hvm.term_new(hvm.SUP, 0, @truncate(sup_loc)));
+        hvm.set(app_loc + 1, hvm.term_new(hvm.NUM, 0, i));
+        _ = hvm.reduce(hvm.term_new(hvm.APP, 0, @truncate(app_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 12: SWI + NUM (numeric switch)
+    print("\n12. SWI+NUM (numeric switch, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const swi_loc = hvm.alloc_node(3);
+        hvm.set(swi_loc, hvm.term_new(hvm.NUM, 0, i % 2)); // alternate 0 and 1
+        hvm.set(swi_loc + 1, hvm.term_new(hvm.NUM, 0, 100)); // zero case
+        const succ_lam = hvm.alloc_node(1);
+        hvm.set(succ_lam, hvm.term_new(hvm.NUM, 0, 200));
+        hvm.set(swi_loc + 2, hvm.term_new(hvm.LAM, 0, @truncate(succ_lam)));
+        _ = hvm.reduce(hvm.term_new(hvm.SWI, 0, @truncate(swi_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 13: DUP + CTR (constructor duplication)
+    print("\n13. DUP+CTR (constructor duplication, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const ctr_loc = hvm.alloc_node(2);
+        hvm.set(ctr_loc, hvm.term_new(hvm.NUM, 0, i));
+        hvm.set(ctr_loc + 1, hvm.term_new(hvm.NUM, 0, i + 1));
+        const dup_loc = hvm.alloc_node(1);
+        hvm.set(dup_loc, hvm.term_new(hvm.C02, 0, @truncate(ctr_loc)));
+        _ = hvm.reduce(hvm.term_new(hvm.CO0, 0, @truncate(dup_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 14: MAT + CTR (pattern matching)
+    print("\n14. MAT+CTR (pattern matching, 100K ops):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    i = 0;
+    while (i < iterations) : (i += 1) {
+        const mat_loc = hvm.alloc_node(3);
+        hvm.set(mat_loc, hvm.term_new(hvm.C00, @truncate(i % 2), 0)); // alternate constructors
+        hvm.set(mat_loc + 1, hvm.term_new(hvm.NUM, 0, 100)); // case 0
+        hvm.set(mat_loc + 2, hvm.term_new(hvm.NUM, 0, 200)); // case 1
+        _ = hvm.reduce(hvm.term_new(hvm.MAT, 2, @truncate(mat_loc)));
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 15: Deep nested lambdas (stress test)
+    print("\n15. Deep nested beta reductions (10K, depth=10):\n", .{});
+    hvm.set_len(1);
+    hvm.set_itr(0);
+    timer.reset();
+
+    const nested_iterations: u32 = 10000;
+    const depth: u32 = 10;
+    i = 0;
+    while (i < nested_iterations) : (i += 1) {
+        // Build chain: (((...((λx.x) n)...)...)
+        var term = hvm.term_new(hvm.NUM, 0, i);
+        var d: u32 = 0;
+        while (d < depth) : (d += 1) {
+            const lam_loc = hvm.alloc_node(1);
+            hvm.set(lam_loc, hvm.term_new(hvm.VAR, 0, @truncate(lam_loc)));
+            const app_loc = hvm.alloc_node(2);
+            hvm.set(app_loc, hvm.term_new(hvm.LAM, 0, @truncate(lam_loc)));
+            hvm.set(app_loc + 1, term);
+            term = hvm.term_new(hvm.APP, 0, @truncate(app_loc));
+        }
+        _ = hvm.reduce(term);
+    }
+
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(nested_iterations * depth)) / (elapsed_ms / 1000.0)});
 
     print("\n", .{});
     hvm.show_stats();

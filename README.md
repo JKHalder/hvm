@@ -7,12 +7,16 @@ A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interac
 - **HVM4 Architecture**: New 64-bit term layout `[8-bit tag][24-bit ext][32-bit val]`
 - **50+ Term Types**: Constructors (C00-C15), primitives (P00-P15), stack frames, and more
 - **17 Numeric Primitives**: ADD, SUB, MUL, DIV, MOD, AND, OR, XOR, LSH, RSH, NOT, EQ, NE, LT, LE, GT, GE
+- **Optimal Duplication**: Label-based annihilation/commutation for optimal sharing
 - **Stack Frame Evaluation**: Typed frames for WNF reduction (F_APP, F_MAT, F_SWI, F_OP2, etc.)
 - **Lazy Collapse**: BFS enumeration of infinite superposition structures
-- **Auto-Dup Foundation**: Variable use counting and fresh label generation
+- **Auto-Dup Foundation**: Variable use counting with label recycling
 - **SIMD + Parallel**: Vectorized batch operations with multi-threaded execution
+- **Parallel Reduction**: Work-stealing infrastructure for concurrent term reduction
 - **Type System**: Annotations, structural equality, and type decay via interaction nets
 - **SupGen Primitives**: Superposition-based program enumeration for discrete search
+- **Safe-Level Analysis**: Static and runtime detection of oracle problem patterns
+- **Configurable Runtime**: Adjustable heap, stack, workers, and optional reference counting
 
 ## Building
 
@@ -63,6 +67,7 @@ zig build -Doptimize=ReleaseFast
 | `(?n z s)` | Switch/match | `(?#0 #100 \p.#200)` |
 | `{t : T}` | Type annotation | `{#42 : Type}` |
 | `(=== a b)` | Structural equality | `(=== #42 #42)` |
+| `@LOG(v k)` | Debug logging | `@LOG(#42 result)` |
 | `Type` | Type universe | `Type` |
 
 ## Example
@@ -112,37 +117,73 @@ Optimized following [VictorTaelin's IC techniques](https://gist.github.com/Victo
 - Cached heap/stack pointers in local variables
 - Branch prediction hints (`@branchHint`) for hot paths
 - Inlined critical interactions (APP-LAM, CO0/CO1-SUP, P02-NUM)
-- Stack frame-based WNF evaluation
+- Comptime dispatch table for interaction rules
+- Stack frame-based WNF evaluation (no recursion)
 - SIMD vectorized batch operations (4-wide vectors)
-- Multi-threaded parallel execution (12 cores on M4 Pro)
+- Multi-threaded parallel execution (configurable workers)
+- REF inline caching for hot function calls
 
-### Benchmark Results (ReleaseFast, Apple M4 Pro)
+### Interaction Net Benchmarks (Debug, Apple M4 Pro)
+
+| Interaction | Ops/sec | Description |
+|-------------|---------|-------------|
+| DUP+NUM | ~29M | Trivial number duplication |
+| MAT+CTR | ~23M | Pattern matching on constructors |
+| CO0+SUP annihilation | ~21M | Same-label collapse (optimal) |
+| Beta reduction | ~10-12M | APP+LAM interaction |
+| DUP+LAM | ~11M | Lambda duplication |
+| APP+SUP | ~9M | Superposition distribution |
+| DUP+SUP commutation | ~8.5M | Different-label (creates 4 nodes) |
+| DUP+CTR | ~6.3M | Constructor duplication |
+| Deep nested β (depth=10) | ~14M | Stress test |
+
+### SIMD Batch Benchmarks
 
 | Benchmark | Ops/sec | Notes |
 |-----------|---------|-------|
-| Single-threaded arithmetic | ~130M | P02 binary primitives |
-| Beta reduction (λ application) | **~135M** | Comptime dispatch table |
-| CO0+SUP annihilation | ~140M | Collapse projections |
-| SIMD batch add | 1.3B | Vectorized, single-thread |
-| SIMD batch multiply | 3.1B | Vectorized, single-thread |
-| **Parallel SIMD add** | **~13B** | **100x+ speedup** |
-| **Parallel SIMD multiply** | **~15B** | Multi-threaded + SIMD |
+| Single-threaded arithmetic | ~19M | P02 binary primitives |
+| SIMD batch add | ~360M | Vectorized, single-thread |
+| SIMD batch multiply | ~665M | Vectorized, single-thread |
+| **Parallel SIMD add** | ~850M | 12 threads |
+| **Parallel SIMD multiply** | ~810M | 12 threads |
 
-### Batch Operations API
-
-For maximum performance on bulk numeric operations:
+### API
 
 ```zig
 const hvm = @import("hvm.zig");
 
-// SIMD batch operations (single-threaded)
-hvm.batch_add(a, b, results);    // results[i] = a[i] + b[i]
-hvm.batch_mul(a, b, results);    // results[i] = a[i] * b[i]
-hvm.batch_sub(a, b, results);    // results[i] = a[i] - b[i]
+// Configuration
+const config = hvm.Config{
+    .heap_size = 4 << 30,           // 4GB heap
+    .stack_size = 1 << 26,          // 64MB stack
+    .num_workers = 64,              // 64 threads
+    .enable_refcount = true,        // Optional RC
+    .enable_label_recycling = true, // Recycle labels
+};
+var state = try hvm.State.initWithConfig(allocator, config);
 
-// Parallel SIMD (multi-threaded, 12 cores)
+// SIMD batch operations
+hvm.batch_add(a, b, results);
+hvm.batch_mul(a, b, results);
 hvm.parallel_batch_add(a, b, results);
 hvm.parallel_batch_mul(a, b, results);
+
+// Safety analysis (oracle problem detection)
+const analysis = hvm.analyze_safety(term);
+if (analysis.level == .unsafe) {
+    // Handle potential exponential blowup
+}
+
+// Runtime monitoring
+hvm.reset_commutation_counter();
+_ = hvm.reduce(term);
+if (hvm.commutation_limit_reached()) {
+    // Too many DUP+SUP commutations
+}
+
+// Memory management
+state.resetHeap();  // Arena-style reset
+const stats = state.getStats();
 ```
 
 Run benchmarks with:

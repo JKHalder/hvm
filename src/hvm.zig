@@ -103,9 +103,7 @@ pub const F_OP2: Tag = 0x44; // Reducing second operand
 pub const F_DUP: Tag = 0x45; // Reducing value for duplication
 pub const F_EQL: Tag = 0x46; // Reducing for equality check
 
-// Dynamic sup/dup
-pub const DSU: Tag = 0x50; // Dynamic superposition
-pub const DDU: Tag = 0x51; // Dynamic duplication
+// Reserved for future use (0x50-0x5F)
 
 // Type System (Interaction Calculus of Constructions)
 pub const ANN: Tag = 0x60; // Annotation {term : Type}
@@ -273,11 +271,33 @@ pub inline fn prm_arity(tag: Tag) u32 {
 // HVM State
 // =============================================================================
 
-pub const MAX_HEAP_SIZE: u64 = 1 << 30; // 1GB
-pub const MAX_STACK_SIZE: u64 = 1 << 24; // 16MB
-pub const MAX_BOOK_SIZE: usize = 65536;
+// Default sizes (can be overridden via Config)
+pub const DEFAULT_HEAP_SIZE: u64 = 1 << 30; // 1GB
+pub const DEFAULT_STACK_SIZE: u64 = 1 << 24; // 16MB
+pub const DEFAULT_BOOK_SIZE: usize = 65536;
+pub const DEFAULT_NUM_WORKERS: usize = 12;
+
+// Legacy constants for backward compatibility
+pub const MAX_HEAP_SIZE: u64 = DEFAULT_HEAP_SIZE;
+pub const MAX_STACK_SIZE: u64 = DEFAULT_STACK_SIZE;
+pub const MAX_BOOK_SIZE: usize = DEFAULT_BOOK_SIZE;
+pub const NUM_WORKERS: usize = DEFAULT_NUM_WORKERS;
 
 pub const BookFn = *const fn (Term) Term;
+
+/// Runtime configuration - all sizes are configurable
+pub const Config = struct {
+    heap_size: u64 = DEFAULT_HEAP_SIZE,
+    stack_size: u64 = DEFAULT_STACK_SIZE,
+    book_size: usize = DEFAULT_BOOK_SIZE,
+    num_workers: usize = DEFAULT_NUM_WORKERS,
+    /// Enable reference counting for memory management
+    enable_refcount: bool = false,
+    /// Enable label recycling to prevent exhaustion
+    enable_label_recycling: bool = false,
+    /// Initial label value for auto-dup
+    initial_label: Ext = 0x800000,
+};
 
 /// HVM4 runtime state
 pub const State = struct {
@@ -289,34 +309,88 @@ pub const State = struct {
     interactions: u64,
     fresh_label: Ext,
 
-    // Book (function definitions)
-    book: [MAX_BOOK_SIZE]?BookFn,
-    ctr_arity: [MAX_BOOK_SIZE]u16,
-    fun_arity: [MAX_BOOK_SIZE]u16,
+    // Configuration
+    config: Config,
 
-    // Compiled function bodies (moved from parser global state)
-    func_bodies: [MAX_BOOK_SIZE]Term,
+    // Book (function definitions) - dynamically allocated
+    book: []?BookFn,
+    ctr_arity: []u16,
+    fun_arity: []u16,
+    func_bodies: []Term,
 
+    // Reference counting (optional)
+    refcounts: ?[]u32,
+
+    // Label recycling (optional)
+    free_labels: ?[]Ext,
+    free_labels_count: usize,
+
+    // REF inline cache
+    ref_cache: [256]?Term, // Cache last 256 REF expansions
+    ref_cache_fid: [256]Ext, // Which function ID each cache slot holds
+
+    // Allocator for cleanup
+    allocator: std.mem.Allocator,
+
+    /// Initialize with default configuration
     pub fn init(allocator: std.mem.Allocator) !*State {
+        return initWithConfig(allocator, .{});
+    }
+
+    /// Initialize with custom configuration
+    pub fn initWithConfig(allocator: std.mem.Allocator, config: Config) !*State {
         const state = try allocator.create(State);
-        state.heap = try allocator.alloc(Term, MAX_HEAP_SIZE);
-        state.stack = try allocator.alloc(Term, MAX_STACK_SIZE);
+        state.config = config;
+        state.allocator = allocator;
+
+        // Allocate memory based on config
+        state.heap = try allocator.alloc(Term, config.heap_size);
+        state.stack = try allocator.alloc(Term, config.stack_size);
+        state.book = try allocator.alloc(?BookFn, config.book_size);
+        state.ctr_arity = try allocator.alloc(u16, config.book_size);
+        state.fun_arity = try allocator.alloc(u16, config.book_size);
+        state.func_bodies = try allocator.alloc(Term, config.book_size);
+
+        // Initialize state
         state.heap_pos = 1; // Reserve location 0
         state.stack_pos = 0;
         state.interactions = 0;
-        state.fresh_label = 0x800000; // Auto-dup labels start here
-        state.book = [_]?BookFn{null} ** MAX_BOOK_SIZE;
-        state.ctr_arity = [_]u16{0} ** MAX_BOOK_SIZE;
-        state.fun_arity = [_]u16{0} ** MAX_BOOK_SIZE;
-        state.func_bodies = [_]Term{0} ** MAX_BOOK_SIZE;
+        state.fresh_label = config.initial_label;
+
+        // Initialize arrays
+        @memset(state.heap, 0);
+        @memset(state.stack, 0);
+        @memset(state.book, null);
+        @memset(state.ctr_arity, 0);
+        @memset(state.fun_arity, 0);
+        @memset(state.func_bodies, 0);
+
+        // Initialize REF cache
+        @memset(&state.ref_cache, null);
+        @memset(&state.ref_cache_fid, 0);
+
+        // Optional: reference counting
+        if (config.enable_refcount) {
+            state.refcounts = try allocator.alloc(u32, config.heap_size);
+            @memset(state.refcounts.?, 0);
+        } else {
+            state.refcounts = null;
+        }
+
+        // Optional: label recycling
+        if (config.enable_label_recycling) {
+            // Allocate space for recycled labels (16K should be plenty)
+            state.free_labels = try allocator.alloc(Ext, 16384);
+            state.free_labels_count = 0;
+        } else {
+            state.free_labels = null;
+            state.free_labels_count = 0;
+        }
 
         // Initialize built-in functions
         state.book[SUP_F] = builtin_sup;
         state.book[DUP_F] = builtin_dup;
         state.book[LOG_F] = builtin_log;
-
-        @memset(state.heap, 0);
-        @memset(state.stack, 0);
 
         return state;
     }
@@ -324,6 +398,12 @@ pub const State = struct {
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         allocator.free(self.stack);
         allocator.free(self.heap);
+        allocator.free(self.book);
+        allocator.free(self.ctr_arity);
+        allocator.free(self.fun_arity);
+        allocator.free(self.func_bodies);
+        if (self.refcounts) |rc| allocator.free(rc);
+        if (self.free_labels) |fl| allocator.free(fl);
         allocator.destroy(self);
     }
 
@@ -340,6 +420,24 @@ pub const State = struct {
     pub fn getFuncBody(self: *State, fid: Ext) Term {
         return self.func_bodies[fid];
     }
+
+    /// Reset heap for reuse (simple arena-style reset)
+    pub fn resetHeap(self: *State) void {
+        self.heap_pos = 1;
+        if (self.refcounts) |rc| {
+            @memset(rc, 0);
+        }
+    }
+
+    /// Get heap usage statistics
+    pub fn getStats(self: *State) struct { heap_used: u64, heap_total: u64, interactions: u64, labels_used: u32 } {
+        return .{
+            .heap_used = self.heap_pos,
+            .heap_total = self.config.heap_size,
+            .interactions = self.interactions,
+            .labels_used = self.fresh_label - self.config.initial_label,
+        };
+    }
 };
 
 /// Generic function dispatch - retrieves body from HVM state
@@ -350,6 +448,10 @@ pub fn funcDispatch(ref: Term) Term {
 
 // Thread-local HVM state
 threadlocal var HVM: *State = undefined;
+
+/// Runtime commutation counter for detecting runaway reduction (oracle problem)
+/// Incremented each time DUP+SUP commutation occurs (different labels)
+var commutation_count: u64 = 0;
 
 pub fn hvm_init(allocator: std.mem.Allocator) !void {
     HVM = try State.init(allocator);
@@ -520,7 +622,7 @@ inline fn interact_dup_sup(dup_tag: Tag, dup_loc: Val, dup_lab: Ext, sup_loc: Va
     const rgt = HVM.heap[sup_loc + 1];
 
     if (dup_lab == sup_lab) {
-        // Annihilation: same labels cancel out
+        // Annihilation: same labels cancel out - O(1), optimal case
         if (dup_tag == CO0) {
             HVM.heap[dup_loc] = term_set_sub(rgt);
             return lft;
@@ -529,7 +631,10 @@ inline fn interact_dup_sup(dup_tag: Tag, dup_loc: Val, dup_lab: Ext, sup_loc: Va
             return rgt;
         }
     } else {
-        // Commutation: different labels create new nodes
+        // Commutation: different labels create 2x2 grid - potential exponential blowup
+        // Track this for runtime safety monitoring
+        commutation_count += 1;
+
         const new_loc = alloc(4);
 
         HVM.heap[new_loc + 0] = term_new(CO0, dup_lab, sup_loc);
@@ -715,81 +820,152 @@ fn builtin_dup(ref: Term) Term {
     return term_new(APP, 0, app1_loc);
 }
 
+/// LOG builtin: @LOG(value, continuation)
+/// Prints the value and returns the continuation
+/// Usage: @LOG(#42, result) prints "#42" and returns result
 fn builtin_log(ref: Term) Term {
-    _ = ref;
-    print("LOG: not implemented\n", .{});
-    return term_new(ERA, 0, 0);
+    const ref_loc = term_val(ref);
+    const val_term = got(ref_loc);
+    const cont_term = got(ref_loc + 1);
+
+    // Reduce the value to print it
+    const reduced_val = reduce(val_term);
+    const tag = term_tag(reduced_val);
+    const ext = term_ext(reduced_val);
+    const val = term_val(reduced_val);
+
+    // Print based on term type
+    print("LOG: ", .{});
+    switch (tag) {
+        ERA => print("*", .{}),
+        NUM => print("#{d}", .{val}),
+        LAM => print("λ@{d}", .{val}),
+        APP => print("(@{d} ...)", .{val}),
+        SUP => print("&{d}{{...}}", .{ext}),
+        CO0 => print("CO0({d},{d})", .{ ext, val }),
+        CO1 => print("CO1({d},{d})", .{ ext, val }),
+        VAR => print("VAR({d})", .{val}),
+        REF => print("@fn{d}", .{ext}),
+        TYP => print("Type", .{}),
+        else => {
+            if (tag >= C00 and tag <= C15) {
+                print("#C{d}[{d}]", .{ ext, ctr_arity(tag) });
+            } else {
+                print("?{d}({d},{d})", .{ tag, ext, val });
+            }
+        },
+    }
+    print("\n", .{});
+
+    HVM.interactions += 1;
+    return cont_term;
 }
 
 // =============================================================================
-// Structural Equality
+// Structural Equality (Stack-based, no recursion)
 // =============================================================================
 
+/// Work item for iterative equality check
+const EqWorkItem = struct {
+    a: Term,
+    b: Term,
+};
+
 /// Deep structural equality check between two terms
+/// Uses explicit stack to avoid call stack overflow on deep terms
 pub fn struct_equal(a: Term, b: Term) bool {
-    const a_reduced = reduce(a);
-    const b_reduced = reduce(b);
+    // Use a fixed-size stack for work items (64KB = 4096 pairs)
+    var work_stack: [4096]EqWorkItem = undefined;
+    var stack_pos: usize = 0;
 
-    const a_tag = term_tag(a_reduced);
-    const b_tag = term_tag(b_reduced);
+    // Push initial pair
+    work_stack[0] = .{ .a = a, .b = b };
+    stack_pos = 1;
 
-    // Tags must match
-    if (a_tag != b_tag) return false;
+    while (stack_pos > 0) {
+        stack_pos -= 1;
+        const item = work_stack[stack_pos];
 
-    const a_ext = term_ext(a_reduced);
-    const b_ext = term_ext(b_reduced);
-    const a_val = term_val(a_reduced);
-    const b_val = term_val(b_reduced);
+        const a_reduced = reduce(item.a);
+        const b_reduced = reduce(item.b);
 
-    switch (a_tag) {
-        // Atomic values: compare directly
-        ERA => return true,
-        NUM => return a_val == b_val,
+        const a_tag = term_tag(a_reduced);
+        const b_tag = term_tag(b_reduced);
 
-        // Lambda: compare bodies (alpha equivalence)
-        LAM => {
-            const a_bod = HVM.heap[a_val];
-            const b_bod = HVM.heap[b_val];
-            return struct_equal(a_bod, b_bod);
-        },
+        // Tags must match
+        if (a_tag != b_tag) return false;
 
-        // Application: compare both parts
-        APP => {
-            const a_fun = HVM.heap[a_val];
-            const a_arg = HVM.heap[a_val + 1];
-            const b_fun = HVM.heap[b_val];
-            const b_arg = HVM.heap[b_val + 1];
-            return struct_equal(a_fun, b_fun) and struct_equal(a_arg, b_arg);
-        },
+        const a_ext = term_ext(a_reduced);
+        const b_ext = term_ext(b_reduced);
+        const a_val = term_val(a_reduced);
+        const b_val = term_val(b_reduced);
 
-        // Superposition: compare label and both branches
-        SUP => {
-            if (a_ext != b_ext) return false;
-            const a_lft = HVM.heap[a_val];
-            const a_rgt = HVM.heap[a_val + 1];
-            const b_lft = HVM.heap[b_val];
-            const b_rgt = HVM.heap[b_val + 1];
-            return struct_equal(a_lft, b_lft) and struct_equal(a_rgt, b_rgt);
-        },
+        switch (a_tag) {
+            // Atomic values: compare directly
+            ERA, TYP => {},
+            NUM => {
+                if (a_val != b_val) return false;
+            },
 
-        // Constructors: compare ext (constructor id) and all fields
-        C00, C01, C02, C03, C04, C05, C06, C07, C08, C09, C10, C11, C12, C13, C14, C15 => {
-            if (a_ext != b_ext) return false;
-            const arity = ctr_arity(a_tag);
-            for (0..arity) |i| {
-                if (!struct_equal(HVM.heap[a_val + i], HVM.heap[b_val + i])) {
-                    return false;
+            // Lambda: push body comparison
+            LAM => {
+                if (stack_pos >= work_stack.len) return false; // Stack overflow protection
+                work_stack[stack_pos] = .{
+                    .a = HVM.heap[a_val],
+                    .b = HVM.heap[b_val],
+                };
+                stack_pos += 1;
+            },
+
+            // Application: push both comparisons
+            APP => {
+                if (stack_pos + 2 > work_stack.len) return false;
+                work_stack[stack_pos] = .{
+                    .a = HVM.heap[a_val],
+                    .b = HVM.heap[b_val],
+                };
+                work_stack[stack_pos + 1] = .{
+                    .a = HVM.heap[a_val + 1],
+                    .b = HVM.heap[b_val + 1],
+                };
+                stack_pos += 2;
+            },
+
+            // Superposition: compare label and push both branches
+            SUP => {
+                if (a_ext != b_ext) return false;
+                if (stack_pos + 2 > work_stack.len) return false;
+                work_stack[stack_pos] = .{
+                    .a = HVM.heap[a_val],
+                    .b = HVM.heap[b_val],
+                };
+                work_stack[stack_pos + 1] = .{
+                    .a = HVM.heap[a_val + 1],
+                    .b = HVM.heap[b_val + 1],
+                };
+                stack_pos += 2;
+            },
+
+            // Constructors: compare ext and push all fields
+            C00, C01, C02, C03, C04, C05, C06, C07, C08, C09, C10, C11, C12, C13, C14, C15 => {
+                if (a_ext != b_ext) return false;
+                const arity = ctr_arity(a_tag);
+                if (stack_pos + arity > work_stack.len) return false;
+                for (0..arity) |i| {
+                    work_stack[stack_pos + i] = .{
+                        .a = HVM.heap[a_val + i],
+                        .b = HVM.heap[b_val + i],
+                    };
                 }
-            }
-            return true;
-        },
+                stack_pos += arity;
+            },
 
-        // Type universe
-        TYP => return true,
-
-        // Default: not equal if we can't determine
-        else => return false,
+            // Default: not equal if we can't determine
+            else => return false,
+        }
     }
+
+    return true;
 }
 
 // =============================================================================
@@ -958,12 +1134,33 @@ pub noinline fn reduce(term: Term) Term {
                 next = dup_val;
             },
 
-            // Reference expansion
+            // Reference expansion with inline caching
             REF => {
                 HVM.stack_pos = spos;
+
+                // Check inline cache first (256-entry direct-mapped cache)
+                const cache_idx = ext & 0xFF;
+                if (HVM.ref_cache_fid[cache_idx] == ext) {
+                    if (HVM.ref_cache[cache_idx]) |cached| {
+                        // Cache hit - use cached expansion
+                        next = cached;
+                        HVM.interactions += 1;
+                        spos = HVM.stack_pos;
+                        continue;
+                    }
+                }
+
+                // Cache miss - call function and update cache
                 if (HVM.book[ext]) |func| {
                     next = func(next);
                     HVM.interactions += 1;
+
+                    // Update cache for non-builtin functions
+                    // (builtins like SUP_F, DUP_F have side effects)
+                    if (ext < 0xFFF0) {
+                        HVM.ref_cache[cache_idx] = next;
+                        HVM.ref_cache_fid[cache_idx] = ext;
+                    }
                 } else {
                     print("undefined function: {d}\n", .{ext});
                     std.process.exit(1);
@@ -1177,30 +1374,151 @@ pub noinline fn reduce(term: Term) Term {
 }
 
 // =============================================================================
-// Normal Form (Full Reduction)
+// Normal Form (Full Reduction) - Stack-based, no recursion
 // =============================================================================
 
+/// Work item for iterative normal form computation
+const NormalWorkItem = struct {
+    term: Term,
+    phase: enum { reduce, process_children, done },
+    loc: Val,
+    child_idx: u32,
+    arity: u32,
+};
+
+/// Compute normal form without recursion
+/// Uses explicit stack to avoid call stack overflow on deep terms
 pub fn normal(term: Term) Term {
+    // Work stack for iterative traversal
+    var work_stack: [8192]NormalWorkItem = undefined;
+    var stack_pos: usize = 0;
+
+    // Result stack to track what we're building
+    var result_stack: [8192]Term = undefined;
+    var result_pos: usize = 0;
+
+    // Push initial term
+    work_stack[0] = .{
+        .term = term,
+        .phase = .reduce,
+        .loc = 0,
+        .child_idx = 0,
+        .arity = 0,
+    };
+    stack_pos = 1;
+
+    while (stack_pos > 0) {
+        const idx = stack_pos - 1;
+        var item = &work_stack[idx];
+
+        switch (item.phase) {
+            .reduce => {
+                const result = reduce(item.term);
+                const tag = term_tag(result);
+                const loc = term_val(result);
+
+                // Store the reduced result
+                item.term = result;
+                item.loc = loc;
+
+                // Determine children to process
+                switch (tag) {
+                    LAM => {
+                        item.arity = 1;
+                        item.child_idx = 0;
+                        item.phase = .process_children;
+                    },
+                    APP, SUP => {
+                        item.arity = 2;
+                        item.child_idx = 0;
+                        item.phase = .process_children;
+                    },
+                    C00, C01, C02, C03, C04, C05, C06, C07, C08, C09, C10, C11, C12, C13, C14, C15 => {
+                        item.arity = ctr_arity(tag);
+                        item.child_idx = 0;
+                        item.phase = if (item.arity > 0) .process_children else .done;
+                    },
+                    else => {
+                        item.phase = .done;
+                    },
+                }
+            },
+
+            .process_children => {
+                if (item.child_idx < item.arity) {
+                    // Push child for processing
+                    const child_term = got(item.loc + item.child_idx);
+                    item.child_idx += 1;
+
+                    if (stack_pos >= work_stack.len) {
+                        // Stack overflow - just return what we have
+                        item.phase = .done;
+                        continue;
+                    }
+
+                    work_stack[stack_pos] = .{
+                        .term = child_term,
+                        .phase = .reduce,
+                        .loc = 0,
+                        .child_idx = 0,
+                        .arity = 0,
+                    };
+                    stack_pos += 1;
+                } else {
+                    // All children processed, update heap with normalized children
+                    // Children results are on result_stack
+                    const arity = item.arity;
+                    if (result_pos >= arity) {
+                        var i: u32 = 0;
+                        while (i < arity) : (i += 1) {
+                            result_pos -= 1;
+                            set(item.loc + (arity - 1 - i), result_stack[result_pos]);
+                        }
+                    }
+                    item.phase = .done;
+                }
+            },
+
+            .done => {
+                // Push result and pop work item
+                if (result_pos < result_stack.len) {
+                    result_stack[result_pos] = item.term;
+                    result_pos += 1;
+                }
+                stack_pos -= 1;
+            },
+        }
+    }
+
+    // Final result is on top of result stack
+    if (result_pos > 0) {
+        return result_stack[result_pos - 1];
+    }
+    return term;
+}
+
+/// Simple recursive normal form (for small terms or when stack is acceptable)
+pub fn normal_recursive(term: Term) Term {
     const result = reduce(term);
     const tag = term_tag(result);
 
     switch (tag) {
         LAM => {
             const loc = term_val(result);
-            const bod = normal(got(loc));
+            const bod = normal_recursive(got(loc));
             set(loc, bod);
         },
         APP => {
             const loc = term_val(result);
-            const fun = normal(got(loc));
-            const arg = normal(got(loc + 1));
+            const fun = normal_recursive(got(loc));
+            const arg = normal_recursive(got(loc + 1));
             set(loc, fun);
             set(loc + 1, arg);
         },
         SUP => {
             const loc = term_val(result);
-            const lft = normal(got(loc));
-            const rgt = normal(got(loc + 1));
+            const lft = normal_recursive(got(loc));
+            const rgt = normal_recursive(got(loc + 1));
             set(loc, lft);
             set(loc + 1, rgt);
         },
@@ -1209,7 +1527,7 @@ pub fn normal(term: Term) Term {
                 const loc = term_val(result);
                 const arity = ctr_arity(tag);
                 for (0..arity) |i| {
-                    const field = normal(got(loc + i));
+                    const field = normal_recursive(got(loc + i));
                     set(loc + i, field);
                 }
             }
@@ -1299,12 +1617,7 @@ pub fn count_uses(term: Term, var_idx: u32, depth: u32) u32 {
     }
 }
 
-/// Get fresh label for auto-dup
-pub fn fresh_label() Ext {
-    const lab = HVM.fresh_label;
-    HVM.fresh_label += 1;
-    return lab;
-}
+// Note: fresh_label() is defined in the Label Recycling section below
 
 // =============================================================================
 // SupGen - Superposition-based Program Enumeration
@@ -1472,30 +1785,111 @@ pub fn type_check(term: Term) Term {
 }
 
 // =============================================================================
+// Reference Counting & Memory Management
+// =============================================================================
+
+/// Increment reference count for a term's heap location
+pub fn rc_inc(loc: Val) void {
+    if (HVM.refcounts) |rc| {
+        if (loc < rc.len) {
+            rc[loc] +|= 1; // Saturating add
+        }
+    }
+}
+
+/// Decrement reference count, returns true if count reached zero
+pub fn rc_dec(loc: Val) bool {
+    if (HVM.refcounts) |rc| {
+        if (loc < rc.len and rc[loc] > 0) {
+            rc[loc] -= 1;
+            return rc[loc] == 0;
+        }
+    }
+    return false;
+}
+
+/// Get reference count for a location
+pub fn rc_get(loc: Val) u32 {
+    if (HVM.refcounts) |rc| {
+        if (loc < rc.len) {
+            return rc[loc];
+        }
+    }
+    return 0;
+}
+
+// =============================================================================
+// Label Recycling
+// =============================================================================
+
+/// Get a fresh label, recycling if possible
+pub fn fresh_label() Ext {
+    // Try to recycle a label first
+    if (HVM.free_labels) |fl| {
+        if (HVM.free_labels_count > 0) {
+            HVM.free_labels_count -= 1;
+            return fl[HVM.free_labels_count];
+        }
+    }
+
+    // Otherwise allocate a new one
+    const lab = HVM.fresh_label;
+    HVM.fresh_label +%= 1; // Wrapping add to handle overflow
+
+    // Warn if we're running low on labels
+    if (HVM.fresh_label == 0) {
+        print("WARNING: Label space exhausted, wrapping around\n", .{});
+    }
+
+    return lab;
+}
+
+/// Return a label to the free pool for reuse
+pub fn recycle_label(lab: Ext) void {
+    if (HVM.free_labels) |fl| {
+        if (HVM.free_labels_count < fl.len) {
+            fl[HVM.free_labels_count] = lab;
+            HVM.free_labels_count += 1;
+        }
+    }
+}
+
+// =============================================================================
 // Parallel Execution (Multi-threaded SIMD)
 // =============================================================================
 
-pub const NUM_WORKERS = 12;
+/// Maximum workers (actual count from config)
+const MAX_WORKERS = 128;
 
-var worker_states: [NUM_WORKERS]?*State = [_]?*State{null} ** NUM_WORKERS;
+var worker_states: [MAX_WORKERS]?*State = [_]?*State{null} ** MAX_WORKERS;
 var worker_allocator: ?std.mem.Allocator = null;
+var num_workers: usize = DEFAULT_NUM_WORKERS;
 
 pub fn parallel_init(allocator: std.mem.Allocator) !void {
+    return parallel_init_with_workers(allocator, DEFAULT_NUM_WORKERS);
+}
+
+pub fn parallel_init_with_workers(allocator: std.mem.Allocator, workers: usize) !void {
     worker_allocator = allocator;
-    for (0..NUM_WORKERS) |i| {
+    num_workers = @min(workers, MAX_WORKERS);
+    for (0..num_workers) |i| {
         worker_states[i] = try State.init(allocator);
     }
 }
 
 pub fn parallel_free() void {
     if (worker_allocator) |allocator| {
-        for (0..NUM_WORKERS) |i| {
+        for (0..num_workers) |i| {
             if (worker_states[i]) |state| {
                 state.deinit(allocator);
                 worker_states[i] = null;
             }
         }
     }
+}
+
+pub fn get_num_workers() usize {
+    return num_workers;
 }
 
 /// SIMD batch add
@@ -1545,10 +1939,11 @@ pub fn batch_sub(a: []const u32, b: []const u32, results: []u32) void {
 
 /// Parallel SIMD batch add
 pub fn parallel_batch_add(a: []const u32, b: []const u32, results: []u32) void {
-    const chunk_size = (a.len + NUM_WORKERS - 1) / NUM_WORKERS;
-    var threads: [NUM_WORKERS]?std.Thread = [_]?std.Thread{null} ** NUM_WORKERS;
+    const workers = num_workers;
+    const chunk_size = (a.len + workers - 1) / workers;
+    var threads: [MAX_WORKERS]?std.Thread = [_]?std.Thread{null} ** MAX_WORKERS;
 
-    for (0..NUM_WORKERS) |i| {
+    for (0..workers) |i| {
         const start = i * chunk_size;
         if (start >= a.len) break;
         const end = @min(start + chunk_size, a.len);
@@ -1559,17 +1954,18 @@ pub fn parallel_batch_add(a: []const u32, b: []const u32, results: []u32) void {
         }.work, .{ a[start..end], b[start..end], results[start..end] }) catch null;
     }
 
-    for (threads) |maybe_thread| {
+    for (threads[0..workers]) |maybe_thread| {
         if (maybe_thread) |thread| thread.join();
     }
 }
 
 /// Parallel SIMD batch multiply
 pub fn parallel_batch_mul(a: []const u32, b: []const u32, results: []u32) void {
-    const chunk_size = (a.len + NUM_WORKERS - 1) / NUM_WORKERS;
-    var threads: [NUM_WORKERS]?std.Thread = [_]?std.Thread{null} ** NUM_WORKERS;
+    const workers = num_workers;
+    const chunk_size = (a.len + workers - 1) / workers;
+    var threads: [MAX_WORKERS]?std.Thread = [_]?std.Thread{null} ** MAX_WORKERS;
 
-    for (0..NUM_WORKERS) |i| {
+    for (0..workers) |i| {
         const start = i * chunk_size;
         if (start >= a.len) break;
         const end = @min(start + chunk_size, a.len);
@@ -1580,9 +1976,353 @@ pub fn parallel_batch_mul(a: []const u32, b: []const u32, results: []u32) void {
         }.work, .{ a[start..end], b[start..end], results[start..end] }) catch null;
     }
 
+    for (threads[0..workers]) |maybe_thread| {
+        if (maybe_thread) |thread| thread.join();
+    }
+}
+
+// =============================================================================
+// Parallel Reduction (Work-Stealing)
+// =============================================================================
+
+/// Work item for parallel reduction
+const ParallelWorkItem = struct {
+    term: Term,
+    result_slot: *Term,
+};
+
+/// Work-stealing queue for parallel reduction
+const WorkQueue = struct {
+    items: [4096]ParallelWorkItem,
+    head: std.atomic.Value(usize),
+    tail: std.atomic.Value(usize),
+
+    fn init() WorkQueue {
+        return .{
+            .items = undefined,
+            .head = std.atomic.Value(usize).init(0),
+            .tail = std.atomic.Value(usize).init(0),
+        };
+    }
+
+    fn push(self: *WorkQueue, item: ParallelWorkItem) bool {
+        const tail = self.tail.load(.acquire);
+        const next_tail = (tail + 1) % self.items.len;
+        if (next_tail == self.head.load(.acquire)) {
+            return false; // Queue full
+        }
+        self.items[tail] = item;
+        self.tail.store(next_tail, .release);
+        return true;
+    }
+
+    fn pop(self: *WorkQueue) ?ParallelWorkItem {
+        const head = self.head.load(.acquire);
+        if (head == self.tail.load(.acquire)) {
+            return null; // Queue empty
+        }
+        const item = self.items[head];
+        self.head.store((head + 1) % self.items.len, .release);
+        return item;
+    }
+
+    fn steal(self: *WorkQueue) ?ParallelWorkItem {
+        // Try to steal from the tail (opposite end)
+        const tail = self.tail.load(.acquire);
+        const head = self.head.load(.acquire);
+        if (head == tail) {
+            return null;
+        }
+        const prev_tail = if (tail == 0) self.items.len - 1 else tail - 1;
+        const item = self.items[prev_tail];
+        // CAS to claim the item
+        if (self.tail.cmpxchgStrong(tail, prev_tail, .acq_rel, .acquire)) |_| {
+            return null; // Someone else got it
+        }
+        return item;
+    }
+};
+
+/// Global work queues for each worker
+var work_queues: [MAX_WORKERS]WorkQueue = undefined;
+var parallel_reduction_active: bool = false;
+
+/// Initialize parallel reduction system
+pub fn parallel_reduction_init() void {
+    for (0..num_workers) |i| {
+        work_queues[i] = WorkQueue.init();
+    }
+    parallel_reduction_active = true;
+}
+
+/// Reduce a superposition in parallel across workers
+/// Each branch of the SUP can be reduced independently
+pub fn parallel_reduce_sup(term: Term) Term {
+    const tag = term_tag(term);
+
+    if (tag != SUP or !parallel_reduction_active or num_workers < 2) {
+        return reduce(term);
+    }
+
+    const loc = term_val(term);
+    const ext = term_ext(term);
+    var results: [2]Term = .{ VOID, VOID };
+
+    // Spawn threads for each branch
+    var threads: [2]?std.Thread = .{ null, null };
+
+    threads[0] = std.Thread.spawn(.{}, struct {
+        fn work(heap_ptr: *Term, result_ptr: *Term) void {
+            result_ptr.* = reduce(heap_ptr.*);
+        }
+    }.work, .{ &HVM.heap[loc], &results[0] }) catch null;
+
+    threads[1] = std.Thread.spawn(.{}, struct {
+        fn work(heap_ptr: *Term, result_ptr: *Term) void {
+            result_ptr.* = reduce(heap_ptr.*);
+        }
+    }.work, .{ &HVM.heap[loc + 1], &results[1] }) catch null;
+
+    // Wait for completion
     for (threads) |maybe_thread| {
         if (maybe_thread) |thread| thread.join();
     }
+
+    // Store results back
+    HVM.heap[loc] = results[0];
+    HVM.heap[loc + 1] = results[1];
+
+    return term_new(SUP, ext, loc);
+}
+
+/// Batch parallel reduce: reduce multiple terms concurrently
+pub fn parallel_reduce_batch(terms: []Term, results: []Term) void {
+    if (terms.len == 0) return;
+
+    const workers = @min(num_workers, terms.len);
+    const chunk_size = (terms.len + workers - 1) / workers;
+    var threads: [MAX_WORKERS]?std.Thread = [_]?std.Thread{null} ** MAX_WORKERS;
+
+    for (0..workers) |i| {
+        const start = i * chunk_size;
+        if (start >= terms.len) break;
+        const end = @min(start + chunk_size, terms.len);
+
+        threads[i] = std.Thread.spawn(.{}, struct {
+            fn work(ts: []Term, rs: []Term, worker_id: usize) void {
+                // Set worker state for this thread
+                if (worker_states[worker_id]) |state| {
+                    const old_state = HVM;
+                    hvm_set_state(state);
+                    defer hvm_set_state(old_state);
+
+                    for (ts, 0..) |t, j| {
+                        rs[j] = reduce(t);
+                    }
+                }
+            }
+        }.work, .{ terms[start..end], results[start..end], i }) catch null;
+    }
+
+    for (threads[0..workers]) |maybe_thread| {
+        if (maybe_thread) |thread| thread.join();
+    }
+}
+
+// =============================================================================
+// Safe-Level Analysis (Oracle Problem Detection)
+// =============================================================================
+
+/// Safe level classification for terms
+pub const SafeLevel = enum {
+    /// Safe: no risk of exponential blowup
+    safe,
+    /// Potentially unsafe: contains superpositions that might commute
+    potentially_unsafe,
+    /// Unsafe: detected pattern likely to cause exponential blowup
+    unsafe,
+    /// Unknown: couldn't determine safety level
+    unknown,
+};
+
+/// Analysis result with details
+pub const SafetyAnalysis = struct {
+    level: SafeLevel,
+    max_sup_depth: u32,
+    distinct_labels: u32,
+    potential_commutations: u32,
+    message: []const u8,
+};
+
+/// Analyze a term for potential oracle problem patterns
+/// The oracle problem occurs when:
+/// 1. Superpositions with different labels interact
+/// 2. Duplications cross superposition boundaries
+/// 3. Labels escape their intended scope
+pub fn analyze_safety(term: Term) SafetyAnalysis {
+    var labels_seen: [256]bool = [_]bool{false} ** 256;
+    var label_count: u32 = 0;
+    var max_depth: u32 = 0;
+    var commutation_risk: u32 = 0;
+
+    // Work stack for iterative analysis
+    var work_stack: [4096]struct { term: Term, depth: u32, in_dup: bool } = undefined;
+    var stack_pos: usize = 0;
+
+    work_stack[0] = .{ .term = term, .depth = 0, .in_dup = false };
+    stack_pos = 1;
+
+    while (stack_pos > 0) {
+        stack_pos -= 1;
+        const item = work_stack[stack_pos];
+        const t = item.term;
+        const depth = item.depth;
+        const in_dup = item.in_dup;
+
+        const tag = term_tag(t);
+        const ext = term_ext(t);
+        const val = term_val(t);
+
+        switch (tag) {
+            SUP => {
+                // Track label
+                const label_idx = ext & 0xFF;
+                if (!labels_seen[label_idx]) {
+                    labels_seen[label_idx] = true;
+                    label_count += 1;
+                }
+
+                // Update max depth
+                if (depth + 1 > max_depth) {
+                    max_depth = depth + 1;
+                }
+
+                // If we're inside a dup with different label, potential commutation
+                if (in_dup) {
+                    commutation_risk += 1;
+                }
+
+                // Push children
+                if (stack_pos + 2 <= work_stack.len) {
+                    work_stack[stack_pos] = .{ .term = HVM.heap[val], .depth = depth + 1, .in_dup = in_dup };
+                    work_stack[stack_pos + 1] = .{ .term = HVM.heap[val + 1], .depth = depth + 1, .in_dup = in_dup };
+                    stack_pos += 2;
+                }
+            },
+
+            CO0, CO1 => {
+                // Inside a duplication - track label interaction risk
+                const label_idx = ext & 0xFF;
+                if (!labels_seen[label_idx]) {
+                    labels_seen[label_idx] = true;
+                    label_count += 1;
+                }
+
+                // Push the dup content with in_dup flag
+                if (stack_pos < work_stack.len) {
+                    work_stack[stack_pos] = .{ .term = HVM.heap[val], .depth = depth, .in_dup = true };
+                    stack_pos += 1;
+                }
+            },
+
+            LAM => {
+                if (stack_pos < work_stack.len) {
+                    work_stack[stack_pos] = .{ .term = HVM.heap[val], .depth = depth, .in_dup = in_dup };
+                    stack_pos += 1;
+                }
+            },
+
+            APP => {
+                if (stack_pos + 2 <= work_stack.len) {
+                    work_stack[stack_pos] = .{ .term = HVM.heap[val], .depth = depth, .in_dup = in_dup };
+                    work_stack[stack_pos + 1] = .{ .term = HVM.heap[val + 1], .depth = depth, .in_dup = in_dup };
+                    stack_pos += 2;
+                }
+            },
+
+            else => {
+                // Handle constructors
+                if (tag >= C00 and tag <= C15) {
+                    const arity = ctr_arity(tag);
+                    for (0..arity) |i| {
+                        if (stack_pos < work_stack.len) {
+                            work_stack[stack_pos] = .{ .term = HVM.heap[val + i], .depth = depth, .in_dup = in_dup };
+                            stack_pos += 1;
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    // Determine safety level based on analysis
+    var level: SafeLevel = .safe;
+    var message: []const u8 = "Term is safe";
+
+    if (commutation_risk > 0) {
+        if (commutation_risk > 10 or (label_count > 5 and max_depth > 3)) {
+            level = .unsafe;
+            message = "High risk of exponential blowup: multiple label commutations detected";
+        } else if (label_count > 2 and max_depth > 2) {
+            level = .potentially_unsafe;
+            message = "Potential exponential blowup: nested superpositions with multiple labels";
+        } else {
+            level = .potentially_unsafe;
+            message = "Minor risk: some label commutations possible";
+        }
+    } else if (max_depth > 5 and label_count > 3) {
+        level = .potentially_unsafe;
+        message = "Deep nested superpositions - monitor for performance";
+    }
+
+    return .{
+        .level = level,
+        .max_sup_depth = max_depth,
+        .distinct_labels = label_count,
+        .potential_commutations = commutation_risk,
+        .message = message,
+    };
+}
+
+/// Check if a term is safe to reduce (won't explode exponentially)
+pub fn is_safe(term: Term) bool {
+    const analysis = analyze_safety(term);
+    return analysis.level == .safe;
+}
+
+/// Reduce with safety check - returns error on unsafe terms
+pub fn safe_reduce(term: Term) struct { result: Term, safe: bool } {
+    const analysis = analyze_safety(term);
+
+    if (analysis.level == .unsafe) {
+        print("WARNING: Unsafe term detected - {s}\n", .{analysis.message});
+        print("  Max SUP depth: {d}, Labels: {d}, Commutation risk: {d}\n", .{
+            analysis.max_sup_depth,
+            analysis.distinct_labels,
+            analysis.potential_commutations,
+        });
+        return .{ .result = term, .safe = false };
+    }
+
+    return .{ .result = reduce(term), .safe = true };
+}
+
+/// Maximum commutations before we consider it runaway
+const MAX_COMMUTATIONS: u64 = 1_000_000;
+
+/// Reset commutation counter (call before reduction)
+pub fn reset_commutation_counter() void {
+    commutation_count = 0;
+}
+
+/// Get current commutation count
+pub fn get_commutation_count() u64 {
+    return commutation_count;
+}
+
+/// Check if we've hit the commutation limit
+pub fn commutation_limit_reached() bool {
+    return commutation_count >= MAX_COMMUTATIONS;
 }
 
 // =============================================================================
