@@ -325,10 +325,6 @@ pub const State = struct {
     free_labels: ?[]Ext,
     free_labels_count: usize,
 
-    // REF inline cache
-    ref_cache: [256]?Term, // Cache last 256 REF expansions
-    ref_cache_fid: [256]Ext, // Which function ID each cache slot holds
-
     // Allocator for cleanup
     allocator: std.mem.Allocator,
 
@@ -364,10 +360,6 @@ pub const State = struct {
         @memset(state.ctr_arity, 0);
         @memset(state.fun_arity, 0);
         @memset(state.func_bodies, 0);
-
-        // Initialize REF cache
-        @memset(&state.ref_cache, null);
-        @memset(&state.ref_cache_fid, 0);
 
         // Optional: reference counting
         if (config.enable_refcount) {
@@ -550,27 +542,30 @@ inline fn interact_app_era() Term {
 }
 
 /// APP + SUP: Superposition distribution
+/// (SUP{f,g} x) => SUP{(f CO0(x)), (g CO1(x))}
 fn interact_app_sup(app_loc: Val, sup_loc: Val, sup_lab: Ext) Term {
     HVM.interactions += 1;
     const arg = HVM.heap[app_loc + 1];
     const lft = HVM.heap[sup_loc];
     const rgt = HVM.heap[sup_loc + 1];
 
-    // Create dup for argument
-    const dup_loc = alloc(1);
+    // Batch allocate: 1 dup + 2 app0 + 2 app1 + 2 result = 7 slots
+    const base = alloc(7);
+    const dup_loc = base;
+    const app0_loc = base + 1;
+    const app1_loc = base + 3;
+    const res_loc = base + 5;
+
+    // Create dup for argument (lazy sharing)
     HVM.heap[dup_loc] = arg;
 
-    // Create two applications
-    const app0_loc = alloc(2);
+    // Create two applications with CO0/CO1 projections
     HVM.heap[app0_loc] = lft;
     HVM.heap[app0_loc + 1] = term_new(CO0, sup_lab, dup_loc);
-
-    const app1_loc = alloc(2);
     HVM.heap[app1_loc] = rgt;
     HVM.heap[app1_loc + 1] = term_new(CO1, sup_lab, dup_loc);
 
     // Create result superposition
-    const res_loc = alloc(2);
     HVM.heap[res_loc] = term_new(APP, 0, app0_loc);
     HVM.heap[res_loc + 1] = term_new(APP, 0, app1_loc);
 
@@ -585,28 +580,27 @@ inline fn interact_dup_era(dup_loc: Val) Term {
 }
 
 /// DUP + LAM: Duplicate lambda
+/// Creates two copies of a lambda with shared body via CO0/CO1 projections
 fn interact_dup_lam(dup_tag: Tag, dup_loc: Val, dup_lab: Ext, lam_loc: Val) Term {
     HVM.interactions += 1;
     const bod = HVM.heap[lam_loc];
 
-    // Create inner dup for body
-    const inner_dup = alloc(1);
+    // Batch allocate: 1 for inner dup + 2 for lambdas = 3 slots
+    const base = alloc(3);
+    const inner_dup = base;
+    const lam0_loc = base + 1;
+    const lam1_loc = base + 2;
+
+    // Create inner dup for body (lazy duplication)
     HVM.heap[inner_dup] = bod;
 
-    // Create two lambdas
-    const lam0_loc = alloc(1);
+    // Create two lambdas with CO0/CO1 projections to shared body
     HVM.heap[lam0_loc] = term_new(CO0, dup_lab, inner_dup);
-
-    const lam1_loc = alloc(1);
     HVM.heap[lam1_loc] = term_new(CO1, dup_lab, inner_dup);
 
-    // Create superposition of lambdas
-    const sup_loc = alloc(2);
-    HVM.heap[sup_loc] = term_new(LAM, 0, lam0_loc);
-    HVM.heap[sup_loc + 1] = term_new(LAM, 0, lam1_loc);
-
-    // Return appropriate projection
+    // Return appropriate projection, store the other for sibling
     if (dup_tag == CO0) {
+        @branchHint(.likely);
         HVM.heap[dup_loc] = term_set_sub(term_new(LAM, 0, lam1_loc));
         return term_new(LAM, 0, lam0_loc);
     } else {
@@ -660,32 +654,34 @@ inline fn interact_dup_num(dup_loc: Val, num: Term) Term {
 }
 
 /// DUP + CTR: Duplicate constructor
+/// CO0(CTR{a,b,...}) => CTR{CO0(a), CO0(b), ...}
 fn interact_dup_ctr(dup_tag: Tag, dup_loc: Val, dup_lab: Ext, ctr_tag: Tag, ctr_loc: Val, ctr_ext: Ext) Term {
     HVM.interactions += 1;
     const arity = ctr_arity(ctr_tag);
 
     if (arity == 0) {
-        // Arity 0: just duplicate the term
+        // Arity 0: just duplicate the term (no fields to copy)
+        @branchHint(.unlikely);
         const ctr = term_new(ctr_tag, ctr_ext, ctr_loc);
         HVM.heap[dup_loc] = term_set_sub(ctr);
         return ctr;
     }
 
-    // Create dups for each field
-    const dups_loc = alloc(arity);
+    // Batch allocate: arity dups + arity ctr0 + arity ctr1 = 3*arity slots
+    const base = alloc(arity * 3);
+    const dups_loc = base;
+    const ctr0_loc = base + arity;
+    const ctr1_loc = base + arity * 2;
+
+    // Copy fields to dup nodes and create CO0/CO1 projections in one pass
     for (0..arity) |i| {
         HVM.heap[dups_loc + i] = HVM.heap[ctr_loc + i];
-    }
-
-    // Create two constructors with CO0/CO1 refs
-    const ctr0_loc = alloc(arity);
-    const ctr1_loc = alloc(arity);
-    for (0..arity) |i| {
         HVM.heap[ctr0_loc + i] = term_new(CO0, dup_lab, @truncate(dups_loc + i));
         HVM.heap[ctr1_loc + i] = term_new(CO1, dup_lab, @truncate(dups_loc + i));
     }
 
     if (dup_tag == CO0) {
+        @branchHint(.likely);
         HVM.heap[dup_loc] = term_set_sub(term_new(ctr_tag, ctr_ext, ctr1_loc));
         return term_new(ctr_tag, ctr_ext, ctr0_loc);
     } else {
@@ -1134,33 +1130,13 @@ pub noinline fn reduce(term: Term) Term {
                 next = dup_val;
             },
 
-            // Reference expansion with inline caching
+            // Reference expansion
             REF => {
                 HVM.stack_pos = spos;
-
-                // Check inline cache first (256-entry direct-mapped cache)
-                const cache_idx = ext & 0xFF;
-                if (HVM.ref_cache_fid[cache_idx] == ext) {
-                    if (HVM.ref_cache[cache_idx]) |cached| {
-                        // Cache hit - use cached expansion
-                        next = cached;
-                        HVM.interactions += 1;
-                        spos = HVM.stack_pos;
-                        continue;
-                    }
-                }
-
-                // Cache miss - call function and update cache
                 if (HVM.book[ext]) |func| {
+                    @branchHint(.likely);
                     next = func(next);
                     HVM.interactions += 1;
-
-                    // Update cache for non-builtin functions
-                    // (builtins like SUP_F, DUP_F have side effects)
-                    if (ext < 0xFFF0) {
-                        HVM.ref_cache[cache_idx] = next;
-                        HVM.ref_cache_fid[cache_idx] = ext;
-                    }
                 } else {
                     print("undefined function: {d}\n", .{ext});
                     std.process.exit(1);
@@ -1250,6 +1226,7 @@ pub noinline fn reduce(term: Term) Term {
 
                 // Comptime dispatch table lookup for value-value interactions
                 if (interaction_table[p_tag][tag]) |interact_fn| {
+                    @branchHint(.likely);
                     // Check if interaction needs stack synchronization
                     if (NeedsSync.check(p_tag, tag)) {
                         HVM.stack_pos = spos;

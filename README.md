@@ -119,23 +119,24 @@ Optimized following [VictorTaelin's IC techniques](https://gist.github.com/Victo
 - Inlined critical interactions (APP-LAM, CO0/CO1-SUP, P02-NUM)
 - Comptime dispatch table for interaction rules
 - Stack frame-based WNF evaluation (no recursion)
+- Batch heap allocations in interaction rules
 - SIMD vectorized batch operations (4-wide vectors)
 - Multi-threaded parallel execution (configurable workers)
-- REF inline caching for hot function calls
 
 ### Interaction Net Benchmarks (Debug, Apple M4 Pro)
 
 | Interaction | Ops/sec | Description |
 |-------------|---------|-------------|
-| DUP+NUM | ~29M | Trivial number duplication |
+| DUP+NUM | ~30M | Trivial number duplication |
 | MAT+CTR | ~23M | Pattern matching on constructors |
+| Deep nested β (depth=10) | ~22M | Stress test |
 | CO0+SUP annihilation | ~21M | Same-label collapse (optimal) |
-| Beta reduction | ~10-12M | APP+LAM interaction |
-| DUP+LAM | ~11M | Lambda duplication |
-| APP+SUP | ~9M | Superposition distribution |
-| DUP+SUP commutation | ~8.5M | Different-label (creates 4 nodes) |
-| DUP+CTR | ~6.3M | Constructor duplication |
-| Deep nested β (depth=10) | ~14M | Stress test |
+| Beta reduction | ~19M | APP+LAM interaction |
+| DUP+LAM | ~19M | Lambda duplication |
+| SWI+NUM | ~16M | Numeric switch |
+| DUP+SUP commutation | ~16M | Different-label (creates 4 nodes) |
+| DUP+CTR | ~14M | Constructor duplication |
+| APP+SUP | ~13M | Superposition distribution |
 
 ### SIMD Batch Benchmarks
 
