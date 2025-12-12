@@ -124,9 +124,53 @@ pub const F_EQL2: Tag = 0x6A; // Second stage of equality check
 pub const VOID: Term = 0;
 
 // =============================================================================
-// Primitive Operation Labels
+// Operator Definitions - Single source of truth for all operator metadata
 // =============================================================================
 
+pub const OpInfo = struct {
+    id: Ext,
+    symbol: []const u8,
+    name: []const u8,
+};
+
+/// Central operator table - used by parser, pretty-printer, and compute_op
+pub const operators = [_]OpInfo{
+    .{ .id = 0x00, .symbol = "+", .name = "add" },
+    .{ .id = 0x01, .symbol = "-", .name = "sub" },
+    .{ .id = 0x02, .symbol = "*", .name = "mul" },
+    .{ .id = 0x03, .symbol = "/", .name = "div" },
+    .{ .id = 0x04, .symbol = "%", .name = "mod" },
+    .{ .id = 0x05, .symbol = "&", .name = "and" },
+    .{ .id = 0x06, .symbol = "|", .name = "or" },
+    .{ .id = 0x07, .symbol = "^", .name = "xor" },
+    .{ .id = 0x08, .symbol = "<<", .name = "lsh" },
+    .{ .id = 0x09, .symbol = ">>", .name = "rsh" },
+    .{ .id = 0x0A, .symbol = "~", .name = "not" },
+    .{ .id = 0x0B, .symbol = "==", .name = "eq" },
+    .{ .id = 0x0C, .symbol = "!=", .name = "ne" },
+    .{ .id = 0x0D, .symbol = "<", .name = "lt" },
+    .{ .id = 0x0E, .symbol = "<=", .name = "le" },
+    .{ .id = 0x0F, .symbol = ">", .name = "gt" },
+    .{ .id = 0x10, .symbol = ">=", .name = "ge" },
+};
+
+/// Get operator symbol from ID
+pub fn op_symbol(id: Ext) []const u8 {
+    for (operators) |op| {
+        if (op.id == id) return op.symbol;
+    }
+    return "?";
+}
+
+/// Get operator ID from symbol (returns null if not found)
+pub fn op_from_symbol(symbol: []const u8) ?Ext {
+    for (operators) |op| {
+        if (std.mem.eql(u8, op.symbol, symbol)) return op.id;
+    }
+    return null;
+}
+
+// Operator ID constants (for backward compatibility and direct access)
 pub const OP_ADD: Ext = 0x00;
 pub const OP_SUB: Ext = 0x01;
 pub const OP_MUL: Ext = 0x02;
@@ -178,16 +222,6 @@ pub inline fn term_ext(t: Term) Ext {
 /// Extract val from term (heap location or immediate value)
 pub inline fn term_val(t: Term) Val {
     return @truncate(t & VAL_MASK);
-}
-
-/// Legacy compatibility: term_lab = term_ext
-pub inline fn term_lab(t: Term) Ext {
-    return term_ext(t);
-}
-
-/// Legacy compatibility: term_loc = term_val
-pub inline fn term_loc(t: Term) u64 {
-    return @as(u64, term_val(t));
 }
 
 /// Check if term has substitution bit set
@@ -260,6 +294,9 @@ pub const State = struct {
     ctr_arity: [MAX_BOOK_SIZE]u16,
     fun_arity: [MAX_BOOK_SIZE]u16,
 
+    // Compiled function bodies (moved from parser global state)
+    func_bodies: [MAX_BOOK_SIZE]Term,
+
     pub fn init(allocator: std.mem.Allocator) !*State {
         const state = try allocator.create(State);
         state.heap = try allocator.alloc(Term, MAX_HEAP_SIZE);
@@ -271,6 +308,7 @@ pub const State = struct {
         state.book = [_]?BookFn{null} ** MAX_BOOK_SIZE;
         state.ctr_arity = [_]u16{0} ** MAX_BOOK_SIZE;
         state.fun_arity = [_]u16{0} ** MAX_BOOK_SIZE;
+        state.func_bodies = [_]Term{0} ** MAX_BOOK_SIZE;
 
         // Initialize built-in functions
         state.book[SUP_F] = builtin_sup;
@@ -292,7 +330,23 @@ pub const State = struct {
     pub fn define(self: *State, fid: Ext, func: BookFn) void {
         self.book[fid] = func;
     }
+
+    /// Register a compiled function body
+    pub fn setFuncBody(self: *State, fid: Ext, body: Term) void {
+        self.func_bodies[fid] = body;
+    }
+
+    /// Get a compiled function body
+    pub fn getFuncBody(self: *State, fid: Ext) Term {
+        return self.func_bodies[fid];
+    }
 };
+
+/// Generic function dispatch - retrieves body from HVM state
+pub fn funcDispatch(ref: Term) Term {
+    const fid = term_ext(ref);
+    return HVM.func_bodies[fid];
+}
 
 // Thread-local HVM state
 threadlocal var HVM: *State = undefined;
@@ -372,15 +426,6 @@ pub inline fn push(term: Term) void {
 pub inline fn pop() Term {
     HVM.stack_pos -= 1;
     return HVM.stack[HVM.stack_pos];
-}
-
-// Legacy compatibility
-pub inline fn spush(term: Term) void {
-    push(term);
-}
-
-pub inline fn spop() Term {
-    return pop();
 }
 
 // =============================================================================
@@ -1023,49 +1068,35 @@ pub noinline fn reduce(term: Term) Term {
                     continue;
                 }
 
-                // F_ANN + LAM: Annotation with lambda - decay (type checks)
-                if (p_tag == F_ANN and tag == LAM) {
+                // F_ANN + value: Annotation decay - extract the term
+                if (p_tag == F_ANN) {
                     HVM.interactions += 1;
-                    // Annotation decays - return the term
-                    next = term_new(LAM, ext, val);
-                    continue;
-                }
 
-                // F_ANN + NUM: Annotation with number - decay
-                if (p_tag == F_ANN and tag == NUM) {
-                    HVM.interactions += 1;
-                    next = term_new(NUM, ext, val);
-                    continue;
-                }
+                    // SUP requires special handling: distribute annotation
+                    if (tag == SUP) {
+                        // {SUP(a,b) : T} => SUP({a:T}, {b:T})
+                        const sup_loc = val;
+                        const sup_ext = ext;
+                        const typ = heap[p_val + 1];
 
-                // F_ANN + CTR: Annotation with constructor - decay
-                if (p_tag == F_ANN and tag >= C00 and tag <= C15) {
-                    HVM.interactions += 1;
+                        const loc0 = alloc(2);
+                        heap[loc0] = heap[sup_loc];
+                        heap[loc0 + 1] = typ;
+
+                        const loc1 = alloc(2);
+                        heap[loc1] = heap[sup_loc + 1];
+                        heap[loc1 + 1] = typ;
+
+                        const new_loc = alloc(2);
+                        heap[new_loc] = term_new(ANN, 0, @truncate(loc0));
+                        heap[new_loc + 1] = term_new(ANN, 0, @truncate(loc1));
+
+                        next = term_new(SUP, sup_ext, @truncate(new_loc));
+                        continue;
+                    }
+
+                    // All other values: annotation decays, return the term unchanged
                     next = term_new(tag, ext, val);
-                    continue;
-                }
-
-                // F_ANN + SUP: Annotation with superposition - distribute
-                if (p_tag == F_ANN and tag == SUP) {
-                    HVM.interactions += 1;
-                    // {SUP(a,b) : T} => SUP({a:T}, {b:T})
-                    const sup_loc = val;
-                    const sup_ext = ext;
-                    const typ = heap[p_val + 1];
-
-                    const loc0 = alloc(2);
-                    heap[loc0] = heap[sup_loc];
-                    heap[loc0 + 1] = typ;
-
-                    const loc1 = alloc(2);
-                    heap[loc1] = heap[sup_loc + 1];
-                    heap[loc1 + 1] = typ;
-
-                    const new_loc = alloc(2);
-                    heap[new_loc] = term_new(ANN, 0, @truncate(loc0));
-                    heap[new_loc + 1] = term_new(ANN, 0, @truncate(loc1));
-
-                    next = term_new(SUP, sup_ext, @truncate(new_loc));
                     continue;
                 }
 

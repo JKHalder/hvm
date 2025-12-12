@@ -200,55 +200,24 @@ pub const Parser = struct {
             }
         }
 
-        // Check for two-char operators first
+        // Check for two-char operators using central table
         if (self.pos + 1 < self.text.len) {
             const two = self.text[self.pos .. self.pos + 2];
-            if (std.mem.eql(u8, two, "==")) {
+            if (hvm.op_from_symbol(two)) |op| {
                 self.pos += 2;
-                return hvm.OP_EQ;
-            }
-            if (std.mem.eql(u8, two, "!=")) {
-                self.pos += 2;
-                return hvm.OP_NE;
-            }
-            if (std.mem.eql(u8, two, "<=")) {
-                self.pos += 2;
-                return hvm.OP_LE;
-            }
-            if (std.mem.eql(u8, two, ">=")) {
-                self.pos += 2;
-                return hvm.OP_GE;
-            }
-            if (std.mem.eql(u8, two, "<<")) {
-                self.pos += 2;
-                return hvm.OP_LSH;
-            }
-            if (std.mem.eql(u8, two, ">>")) {
-                self.pos += 2;
-                return hvm.OP_RSH;
+                return op;
             }
         }
 
+        // Check for single-char operators using central table
         const c = self.text[self.pos];
-        self.pos += 1;
-        return switch (c) {
-            '+' => hvm.OP_ADD,
-            '-' => hvm.OP_SUB,
-            '*' => hvm.OP_MUL,
-            '/' => hvm.OP_DIV,
-            '%' => hvm.OP_MOD,
-            '=' => hvm.OP_EQ,
-            '!' => hvm.OP_NE,
-            '<' => hvm.OP_LT,
-            '>' => hvm.OP_GT,
-            '&' => hvm.OP_AND,
-            '|' => hvm.OP_OR,
-            '^' => hvm.OP_XOR,
-            else => {
-                self.pos -= 1;
-                return null;
-            },
-        };
+        const single = &[_]u8{c};
+        if (hvm.op_from_symbol(single)) |op| {
+            self.pos += 1;
+            return op;
+        }
+
+        return null;
     }
 
     // Bind a variable name to a heap location
@@ -774,23 +743,11 @@ pub const Parser = struct {
     }
 
     fn createFuncWrapper(fid: u16, body: hvm.Term) hvm.BookFn {
-        // Store the body in a global lookup
-        func_bodies[fid] = body;
-        return funcDispatch;
+        // Store the body in HVM state (not global - thread-safe)
+        hvm.hvm_get_state().setFuncBody(fid, body);
+        return hvm.funcDispatch;
     }
 };
-
-// Global storage for function bodies (workaround for Zig's function pointer limitations)
-var func_bodies: [65536]hvm.Term = [_]hvm.Term{0} ** 65536;
-
-fn funcDispatch(ref: hvm.Term) hvm.Term {
-    const fid = hvm.term_ext(ref);
-    const body = func_bodies[fid];
-
-    // For now, just return the body
-    // A full implementation would substitute arguments
-    return body;
-}
 
 // =============================================================================
 // Public API
@@ -869,27 +826,8 @@ fn prettyInto(allocator: Allocator, buf: *ArrayList(u8), term: hvm.Term) !void {
         hvm.VAR => try std.fmt.format(buf.writer(allocator), "VAR({d})", .{val}),
         hvm.REF => try std.fmt.format(buf.writer(allocator), "@{d}", .{ext}),
         hvm.P02, hvm.F_OP2 => {
-            const op_str: []const u8 = switch (ext) {
-                hvm.OP_ADD => "+",
-                hvm.OP_SUB => "-",
-                hvm.OP_MUL => "*",
-                hvm.OP_DIV => "/",
-                hvm.OP_MOD => "%",
-                hvm.OP_EQ => "==",
-                hvm.OP_NE => "!=",
-                hvm.OP_LT => "<",
-                hvm.OP_GT => ">",
-                hvm.OP_LE => "<=",
-                hvm.OP_GE => ">=",
-                hvm.OP_AND => "&",
-                hvm.OP_OR => "|",
-                hvm.OP_XOR => "^",
-                hvm.OP_LSH => "<<",
-                hvm.OP_RSH => ">>",
-                else => "?",
-            };
             try buf.append(allocator, '(');
-            try buf.appendSlice(allocator, op_str);
+            try buf.appendSlice(allocator, hvm.op_symbol(ext));
             try buf.append(allocator, ' ');
             try prettyInto(allocator, buf, hvm.got(val));
             try buf.append(allocator, ' ');
