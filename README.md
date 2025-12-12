@@ -22,6 +22,9 @@ A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interac
 - **Supercombinators**: Pre-compiled S, K, B, C combinators and Church numeral optimizations
 - **Compiled Reducer**: Direct-threaded dispatch with comptime-generated handler tables (5x speedup)
 - **Metal GPU Acceleration**: Pure Zig Metal bindings for macOS GPU compute (Apple Silicon)
+- **GPU-Resident Reduction**: Full reduction loop on GPU with no CPU round-trips (2x sustained throughput)
+- **Heterogeneous GPU Batching**: Mixed redex types processed in single dispatch
+- **Async GPU Pipelining**: Triple-buffered command submission for overlapped execution
 
 ## Building
 
@@ -177,6 +180,20 @@ Optimized following [VictorTaelin's IC techniques](https://gist.github.com/Victo
 | Pure parallel computation | ~31B | **227x** |
 | **Parallel beta reduction** | **~42B** | **310x** |
 
+### Metal GPU Benchmarks (Apple M4 Pro)
+
+| Benchmark | Ops/sec | Notes |
+|-----------|---------|-------|
+| GPU batch add | ~544M | Simple arithmetic |
+| GPU batch multiply | ~2.3B | 18x vs CPU SIMD |
+| GPU heap transfer | ~2.3B terms/sec | Shared memory |
+| GPU APP-LAM | ~224M | Beta reduction |
+| GPU OP2-NUM | ~204M | 16 arithmetic ops |
+| GPU SUP-CO0 | ~248M | Annihilation |
+| **GPU-Resident Heterogeneous** | ~211M | Mixed types, single dispatch |
+| **GPU-Resident Multi-Step** | ~380M | No CPU round-trips |
+| **GPU-Resident Sustained** | **~424M** | **2x vs single-shot** |
+
 ### API
 
 ```zig
@@ -214,6 +231,27 @@ if (hvm.commutation_limit_reached()) {
 // Memory management
 state.resetHeap();  // Arena-style reset
 const stats = state.getStats();
+
+// GPU-Resident Reduction (macOS Metal)
+const metal = @import("metal.zig");
+var gpu = try metal.MetalGPU.init();
+defer gpu.deinit();
+
+// Allocate GPU-resident state (16M terms, 1M redexes)
+try gpu.allocGpuResidentState(16 * 1024 * 1024, 1024 * 1024);
+
+// Upload heap once
+try gpu.uploadGpuHeap(heap_data);
+
+// Run multiple reduction steps without CPU round-trips
+const stats = try gpu.gpuReduceResident(redexes, alloc_ptr, max_steps);
+// stats.interactions, stats.allocations, stats.new_redexes
+
+// Or heterogeneous batch (mixed APP-LAM, CO0-SUP, OP2-NUM, ERA)
+const batch_stats = try gpu.gpuInteractHeterogeneous(mixed_redexes, alloc_ptr);
+
+// Download results once at end
+try gpu.downloadGpuHeap(result_data);
 ```
 
 Run benchmarks with:

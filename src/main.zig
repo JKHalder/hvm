@@ -1407,6 +1407,10 @@ fn run_benchmark() void {
     var gpu_add_ops_sec: f64 = 0;
     var gpu_mul_ops_sec: f64 = 0;
     var gpu_heap_ops_sec: f64 = 0;
+    var gpu_beta_ops_sec: f64 = 0;
+    var gpu_op2_ops_sec: f64 = 0;
+    var gpu_sup_ops_sec: f64 = 0;
+    var gpu_mat_ops_sec: f64 = 0;
 
     if (metal.is_supported and metal.isAvailable()) {
         print("\n--- Metal GPU Benchmarks ---\n", .{});
@@ -1532,6 +1536,457 @@ fn run_benchmark() void {
                 if (download_data[j] == heap_data[j]) matches += 1;
             }
             print("  Verified: {d}/{d} terms match\n", .{ matches, heap_size });
+
+            // =================================================================
+            // HVM Interaction Kernel Benchmarks (GPU)
+            // =================================================================
+            print("\n--- GPU HVM Interaction Benchmarks ---\n", .{});
+
+            const hvm_batch_size: usize = 10_000_000; // 10M interactions for GPU efficiency
+
+            // Prepare test data for HVM interactions
+            const hvm_apps = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_apps);
+
+            const hvm_lams = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_lams);
+
+            const hvm_results = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_results);
+
+            // Create a small heap for interactions
+            const hvm_heap_size: usize = hvm_batch_size * 2;
+            const hvm_heap = allocator.alloc(u64, hvm_heap_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_heap);
+
+            // Initialize test data
+            // APP terms pointing to (func, arg) pairs in heap
+            // LAM terms pointing to body in heap
+            for (0..hvm_batch_size) |j| {
+                const heap_idx: u32 = @truncate(j * 2);
+                hvm_apps[j] = hvm.term_new(hvm.APP, 0, heap_idx);
+                hvm_lams[j] = hvm.term_new(hvm.LAM, 0, heap_idx);
+                // Heap: [body, arg] pairs
+                hvm_heap[j * 2] = hvm.term_new(hvm.NUM, 0, @truncate(j)); // body
+                hvm_heap[j * 2 + 1] = hvm.term_new(hvm.NUM, 0, @truncate(j + 100)); // arg
+            }
+
+            // Benchmark 31: GPU APP-LAM interaction (beta reduction)
+            print("\n31. GPU APP-LAM interaction (10M ops):\n", .{});
+
+            // CPU baseline (simulated)
+            timer.reset();
+            for (0..hvm_batch_size) |j| {
+                const lam_val = hvm.term_val(hvm_lams[j]);
+                const body = hvm_heap[lam_val];
+                const arg = hvm_heap[hvm.term_val(hvm_apps[j]) + 1];
+                hvm_results[j] = hvm.term_new(hvm.term_tag(body), 0, hvm.term_val(arg));
+            }
+            const cpu_beta_ns = timer.read();
+            const cpu_beta_ms = @as(f64, @floatFromInt(cpu_beta_ns)) / 1_000_000.0;
+            const cpu_beta_ops = @as(f64, @floatFromInt(hvm_batch_size)) / (cpu_beta_ms / 1000.0);
+            print("  CPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ cpu_beta_ms, cpu_beta_ops });
+
+            // GPU
+            timer.reset();
+            gpu.gpuInteractAppLam(hvm_apps, hvm_lams, hvm_results, hvm_heap) catch {
+                print("  GPU dispatch failed\n", .{});
+                return;
+            };
+            const gpu_beta_ns = timer.read();
+            const gpu_beta_ms = @as(f64, @floatFromInt(gpu_beta_ns)) / 1_000_000.0;
+            gpu_beta_ops_sec = @as(f64, @floatFromInt(hvm_batch_size)) / (gpu_beta_ms / 1000.0);
+            print("  GPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ gpu_beta_ms, gpu_beta_ops_sec });
+            print("  Speedup: {d:.1}x\n", .{gpu_beta_ops_sec / cpu_beta_ops});
+
+            // Benchmark 32: GPU OP2-NUM interaction (arithmetic with branching)
+            print("\n32. GPU OP2-NUM interaction (10M ops):\n", .{});
+
+            // Setup OP2 terms with various opcodes
+            const hvm_ops = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_ops);
+
+            const hvm_nums = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_nums);
+
+            for (0..hvm_batch_size) |j| {
+                const opcode: u24 = @truncate(j % 16); // Cycle through 16 opcodes
+                const heap_idx: u32 = @truncate(j);
+                hvm_ops[j] = hvm.term_new(hvm.P02, opcode, heap_idx); // P02 = binary primitive
+                hvm_nums[j] = hvm.term_new(hvm.NUM, 0, @truncate(j + 1));
+                hvm_heap[j] = hvm.term_new(hvm.NUM, 0, @truncate((j % 31) + 1)); // Second operand
+            }
+
+            // CPU baseline with all 16 operations
+            timer.reset();
+            for (0..hvm_batch_size) |j| {
+                const opcode = hvm.term_ext(hvm_ops[j]);
+                const op_a = hvm.term_val(hvm_nums[j]);
+                const op_b = hvm.term_val(hvm_heap[hvm.term_val(hvm_ops[j])]);
+                const result: u32 = switch (opcode) {
+                    0 => op_a +% op_b,
+                    1 => op_a -% op_b,
+                    2 => op_a *% op_b,
+                    3 => if (op_b != 0) op_a / op_b else 0,
+                    4 => if (op_b != 0) op_a % op_b else 0,
+                    5 => op_a & op_b,
+                    6 => op_a | op_b,
+                    7 => op_a ^ op_b,
+                    8 => op_a << @truncate(op_b & 31),
+                    9 => op_a >> @truncate(op_b & 31),
+                    10 => if (op_a == op_b) 1 else 0,
+                    11 => if (op_a != op_b) 1 else 0,
+                    12 => if (op_a < op_b) 1 else 0,
+                    13 => if (op_a <= op_b) 1 else 0,
+                    14 => if (op_a > op_b) 1 else 0,
+                    15 => if (op_a >= op_b) 1 else 0,
+                    else => 0,
+                };
+                hvm_results[j] = hvm.term_new(hvm.NUM, 0, result);
+            }
+            const cpu_op2_ns = timer.read();
+            const cpu_op2_ms = @as(f64, @floatFromInt(cpu_op2_ns)) / 1_000_000.0;
+            const cpu_op2_ops = @as(f64, @floatFromInt(hvm_batch_size)) / (cpu_op2_ms / 1000.0);
+            print("  CPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ cpu_op2_ms, cpu_op2_ops });
+
+            // GPU
+            timer.reset();
+            gpu.gpuInteractOp2Num(hvm_ops, hvm_nums, hvm_results, hvm_heap) catch {
+                print("  GPU dispatch failed\n", .{});
+                return;
+            };
+            const gpu_op2_ns = timer.read();
+            const gpu_op2_ms = @as(f64, @floatFromInt(gpu_op2_ns)) / 1_000_000.0;
+            gpu_op2_ops_sec = @as(f64, @floatFromInt(hvm_batch_size)) / (gpu_op2_ms / 1000.0);
+            print("  GPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ gpu_op2_ms, gpu_op2_ops_sec });
+            print("  Speedup: {d:.1}x\n", .{gpu_op2_ops_sec / cpu_op2_ops});
+
+            // Benchmark 33: GPU SUP-CO0 interaction (annihilation)
+            print("\n33. GPU SUP-CO0 interaction (10M ops):\n", .{});
+
+            const hvm_sups = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_sups);
+
+            const hvm_co0s = allocator.alloc(u64, hvm_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_co0s);
+
+            for (0..hvm_batch_size) |j| {
+                const label: u24 = @truncate(j % 1000); // Labels 0-999
+                const heap_idx: u32 = @truncate(j);
+                hvm_sups[j] = hvm.term_new(hvm.SUP, label, heap_idx);
+                hvm_co0s[j] = hvm.term_new(hvm.CO0, label, heap_idx); // Same label = annihilate
+            }
+
+            // CPU baseline
+            timer.reset();
+            for (0..hvm_batch_size) |j| {
+                const sup_label = hvm.term_ext(hvm_sups[j]);
+                const co0_label = hvm.term_ext(hvm_co0s[j]);
+                const sup_val = hvm.term_val(hvm_sups[j]);
+                if (sup_label == co0_label) {
+                    hvm_results[j] = hvm_heap[sup_val];
+                } else {
+                    hvm_results[j] = hvm.term_new(hvm.SUP, co0_label, sup_val);
+                }
+            }
+            const cpu_sup_ns = timer.read();
+            const cpu_sup_ms = @as(f64, @floatFromInt(cpu_sup_ns)) / 1_000_000.0;
+            const cpu_sup_ops = @as(f64, @floatFromInt(hvm_batch_size)) / (cpu_sup_ms / 1000.0);
+            print("  CPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ cpu_sup_ms, cpu_sup_ops });
+
+            // GPU
+            timer.reset();
+            gpu.gpuInteractSupCo0(hvm_sups, hvm_co0s, hvm_results, hvm_heap) catch {
+                print("  GPU dispatch failed\n", .{});
+                return;
+            };
+            const gpu_sup_ns = timer.read();
+            const gpu_sup_ms = @as(f64, @floatFromInt(gpu_sup_ns)) / 1_000_000.0;
+            gpu_sup_ops_sec = @as(f64, @floatFromInt(hvm_batch_size)) / (gpu_sup_ms / 1000.0);
+            print("  GPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ gpu_sup_ms, gpu_sup_ops_sec });
+            print("  Speedup: {d:.1}x\n", .{gpu_sup_ops_sec / cpu_sup_ops});
+
+            // Benchmark 34: GPU MAT-CTR interaction (pattern matching)
+            // Note: Uses smaller batch (1M) due to large branch table (16 branches per op = 128MB)
+            print("\n34. GPU MAT-CTR interaction (1M ops):\n", .{});
+
+            const mat_batch_size: usize = 1_000_000;
+
+            const hvm_mats = allocator.alloc(u64, mat_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_mats);
+
+            const hvm_ctrs = allocator.alloc(u64, mat_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_ctrs);
+
+            const mat_results = allocator.alloc(u64, mat_batch_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(mat_results);
+
+            // Branch table (16 branches per match)
+            const branch_table_size = mat_batch_size * 16;
+            const hvm_branches = allocator.alloc(u64, branch_table_size) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(hvm_branches);
+
+            for (0..mat_batch_size) |j| {
+                const branch_base: u32 = @truncate(j * 16);
+                const ctr_idx: u8 = @truncate(j % 16);
+                hvm_mats[j] = hvm.term_new(hvm.MAT, 0, branch_base);
+                hvm_ctrs[j] = hvm.term_new(hvm.C00 + ctr_idx, 0, @truncate(j));
+
+                // Initialize branches
+                for (0..16) |br| {
+                    hvm_branches[j * 16 + br] = hvm.term_new(hvm.NUM, 0, @truncate(br * 100 + j));
+                }
+            }
+
+            // CPU baseline
+            timer.reset();
+            for (0..mat_batch_size) |j| {
+                const mat_val = hvm.term_val(hvm_mats[j]);
+                const ctr_tag = hvm.term_tag(hvm_ctrs[j]);
+                const ctr_idx = ctr_tag & 0x0F;
+                const branch = hvm_branches[mat_val + ctr_idx];
+                const ctr_val = hvm.term_val(hvm_ctrs[j]);
+                mat_results[j] = hvm.term_new(hvm.term_tag(branch), hvm.term_ext(branch), ctr_val);
+            }
+            const cpu_mat_ns = timer.read();
+            const cpu_mat_ms = @as(f64, @floatFromInt(cpu_mat_ns)) / 1_000_000.0;
+            const cpu_mat_ops = @as(f64, @floatFromInt(mat_batch_size)) / (cpu_mat_ms / 1000.0);
+            print("  CPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ cpu_mat_ms, cpu_mat_ops });
+
+            // GPU
+            timer.reset();
+            gpu.gpuInteractMatCtr(hvm_mats, hvm_ctrs, mat_results, hvm_branches) catch {
+                print("  GPU dispatch failed\n", .{});
+                return;
+            };
+            const gpu_mat_ns = timer.read();
+            const gpu_mat_ms = @as(f64, @floatFromInt(gpu_mat_ns)) / 1_000_000.0;
+            gpu_mat_ops_sec = @as(f64, @floatFromInt(mat_batch_size)) / (gpu_mat_ms / 1000.0);
+            print("  GPU: {d:.2} ms ({d:.0} ops/sec)\n", .{ gpu_mat_ms, gpu_mat_ops_sec });
+            print("  Speedup: {d:.1}x\n", .{gpu_mat_ops_sec / cpu_mat_ops});
+
+            // =================================================================
+            // GPU-RESIDENT REDUCTION BENCHMARKS
+            // =================================================================
+            print("\n--- GPU-Resident Reduction Benchmarks ---\n", .{});
+
+            // Allocate GPU-resident state (16M terms heap, 1M redexes)
+            const gpu_heap_cap: usize = 16 * 1024 * 1024;
+            const gpu_redex_cap: usize = 1024 * 1024;
+            gpu.allocGpuResidentState(gpu_heap_cap, gpu_redex_cap) catch {
+                print("  GPU-resident state allocation failed\n", .{});
+                return;
+            };
+
+            // Benchmark 35: GPU-Resident Heterogeneous Batch
+            print("\n35. GPU-Resident Heterogeneous Batch (1M mixed redexes):\n", .{});
+
+            const resident_batch: usize = 1_000_000;
+
+            // Create test heap on GPU
+            const test_heap = allocator.alloc(u64, gpu_heap_cap) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(test_heap);
+
+            // Create redexes (mixed types)
+            const redexes = allocator.alloc([2]u32, resident_batch) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(redexes);
+
+            // Initialize heap with proper redex patterns:
+            // For each redex (loc_a, loc_b), the kernel reads heap[loc_a] and heap[loc_b]
+            // APP-LAM: heap[loc_a] = APP, heap[loc_b] = LAM
+            // CO0-SUP: heap[loc_a] = CO0, heap[loc_b] = SUP
+            var heap_ptr: u32 = 0;
+            for (0..resident_batch) |j| {
+                const pattern = j % 3;
+                if (pattern == 0) {
+                    // APP-LAM pattern
+                    // APP at heap_ptr points to (func_loc, arg)
+                    // LAM at heap_ptr+1 points to body
+                    test_heap[heap_ptr] = hvm.term_new(hvm.APP, 0, heap_ptr + 2); // APP -> (heap_ptr+2, heap_ptr+3)
+                    test_heap[heap_ptr + 1] = hvm.term_new(hvm.LAM, 0, heap_ptr + 4); // LAM -> body at heap_ptr+4
+                    test_heap[heap_ptr + 2] = hvm.term_new(hvm.LAM, 0, heap_ptr + 4); // func = LAM
+                    test_heap[heap_ptr + 3] = hvm.term_new(hvm.NUM, 0, @truncate(j)); // arg = NUM
+                    test_heap[heap_ptr + 4] = hvm.term_new(hvm.NUM, 0, @truncate(j * 2)); // body = NUM
+                    redexes[j] = .{ heap_ptr, heap_ptr + 1 };
+                    heap_ptr += 5;
+                } else if (pattern == 1) {
+                    // CO0-SUP pattern (same label = annihilation)
+                    const label: u24 = @truncate(j % 256);
+                    test_heap[heap_ptr] = hvm.term_new(hvm.CO0, label, heap_ptr + 2); // CO0 -> target
+                    test_heap[heap_ptr + 1] = hvm.term_new(hvm.SUP, label, heap_ptr + 2); // SUP{first, second}
+                    test_heap[heap_ptr + 2] = hvm.term_new(hvm.NUM, 0, @truncate(j)); // first
+                    test_heap[heap_ptr + 3] = hvm.term_new(hvm.NUM, 0, @truncate(j + 1)); // second
+                    redexes[j] = .{ heap_ptr, heap_ptr + 1 };
+                    heap_ptr += 4;
+                } else {
+                    // ERA-ANY pattern (always interacts)
+                    test_heap[heap_ptr] = hvm.term_new(hvm.ERA, 0, 0); // ERA
+                    test_heap[heap_ptr + 1] = hvm.term_new(hvm.NUM, 0, @truncate(j)); // ANY
+                    redexes[j] = .{ heap_ptr, heap_ptr + 1 };
+                    heap_ptr += 2;
+                }
+            }
+
+            // Upload heap to GPU
+            gpu.uploadGpuHeap(test_heap[0..heap_ptr]) catch {
+                print("  Heap upload failed\n", .{});
+                return;
+            };
+
+            // GPU-resident heterogeneous batch
+            timer.reset();
+            const hetero_stats = gpu.gpuInteractHeterogeneous(redexes, heap_ptr) catch {
+                print("  GPU heterogeneous dispatch failed\n", .{});
+                return;
+            };
+            const gpu_hetero_ns = timer.read();
+            const gpu_hetero_ms = @as(f64, @floatFromInt(gpu_hetero_ns)) / 1_000_000.0;
+            const gpu_hetero_ops_sec = @as(f64, @floatFromInt(resident_batch)) / (gpu_hetero_ms / 1000.0);
+            print("  Time: {d:.2} ms\n", .{gpu_hetero_ms});
+            print("  Throughput: {d:.0} ops/sec\n", .{gpu_hetero_ops_sec});
+            print("  Interactions: {d}\n", .{hetero_stats.interactions});
+            print("  Allocations: {d}\n", .{hetero_stats.allocations});
+            print("  New redexes: {d}\n", .{hetero_stats.new_redexes});
+
+            // Benchmark 36: GPU-Resident Multi-Step Reduction
+            print("\n36. GPU-Resident Multi-Step Reduction (10 steps, 100K initial redexes):\n", .{});
+
+            const multi_step_batch: usize = 100_000;
+            const max_steps: u32 = 10;
+
+            // Re-initialize heap with APP-LAM redexes
+            heap_ptr = 0;
+            for (0..multi_step_batch) |j| {
+                // Create APP-LAM redex pairs
+                test_heap[heap_ptr] = hvm.term_new(hvm.APP, 0, heap_ptr + 2); // APP -> (func, arg)
+                test_heap[heap_ptr + 1] = hvm.term_new(hvm.LAM, 0, heap_ptr + 4); // LAM -> body
+                test_heap[heap_ptr + 2] = hvm.term_new(hvm.LAM, 0, heap_ptr + 4); // func
+                test_heap[heap_ptr + 3] = hvm.term_new(hvm.NUM, 0, @truncate(j)); // arg
+                test_heap[heap_ptr + 4] = hvm.term_new(hvm.NUM, 0, @truncate(j * 2)); // body
+                heap_ptr += 5;
+            }
+            gpu.uploadGpuHeap(test_heap[0..heap_ptr]) catch {
+                print("  Heap upload failed\n", .{});
+                return;
+            };
+
+            // Create initial redexes
+            const multi_redexes = allocator.alloc([2]u32, multi_step_batch) catch {
+                print("  Allocation failed\n", .{});
+                return;
+            };
+            defer allocator.free(multi_redexes);
+
+            for (0..multi_step_batch) |j| {
+                const base: u32 = @truncate(j * 5);
+                multi_redexes[j] = .{ base, base + 1 }; // APP at base, LAM at base+1
+            }
+
+            // GPU-resident multi-step reduction
+            timer.reset();
+            const multi_stats = gpu.gpuReduceResident(multi_redexes, heap_ptr, max_steps) catch {
+                print("  GPU multi-step dispatch failed\n", .{});
+                return;
+            };
+            const gpu_multi_ns = timer.read();
+            const gpu_multi_ms = @as(f64, @floatFromInt(gpu_multi_ns)) / 1_000_000.0;
+            const total_interactions = multi_stats.interactions;
+            const gpu_multi_ops_sec = @as(f64, @floatFromInt(total_interactions)) / (gpu_multi_ms / 1000.0);
+            print("  Time: {d:.2} ms\n", .{gpu_multi_ms});
+            print("  Total interactions: {d}\n", .{total_interactions});
+            print("  Throughput: {d:.0} interactions/sec\n", .{gpu_multi_ops_sec});
+            print("  Allocations: {d}\n", .{multi_stats.allocations});
+            print("  Remaining redexes: {d}\n", .{multi_stats.new_redexes});
+
+            // CPU comparison for multi-step
+            timer.reset();
+            var cpu_interactions: u32 = 0;
+            for (0..multi_step_batch) |j| {
+                // Simulate 10 beta reductions
+                for (0..max_steps) |_| {
+                    const base: u32 = @truncate(j * 3);
+                    _ = test_heap[base];
+                    _ = test_heap[base + 1];
+                    _ = test_heap[base + 2];
+                    cpu_interactions += 1;
+                }
+            }
+            const cpu_multi_ns = timer.read();
+            const cpu_multi_ms = @as(f64, @floatFromInt(cpu_multi_ns)) / 1_000_000.0;
+            const cpu_multi_ops_sec = @as(f64, @floatFromInt(cpu_interactions)) / (cpu_multi_ms / 1000.0);
+            print("  CPU baseline: {d:.2} ms ({d:.0} interactions/sec)\n", .{ cpu_multi_ms, cpu_multi_ops_sec });
+            if (gpu_multi_ops_sec > 0 and cpu_multi_ops_sec > 0) {
+                print("  GPU Speedup: {d:.1}x\n", .{gpu_multi_ops_sec / cpu_multi_ops_sec});
+            }
+
+            // Benchmark 37: GPU-Resident Sustained Throughput
+            print("\n37. GPU-Resident Sustained Throughput (10M ops, no CPU round-trips):\n", .{});
+
+            const sustained_iters: usize = 10;
+
+            // Re-use existing heap, run multiple iterations without re-upload
+            var sustained_total_ops: u64 = 0;
+
+            timer.reset();
+            for (0..sustained_iters) |_| {
+                // Re-use same redexes
+                const stats = gpu.gpuInteractHeterogeneous(redexes[0..@min(resident_batch, gpu_redex_cap)], heap_ptr) catch {
+                    print("  GPU sustained dispatch failed\n", .{});
+                    return;
+                };
+                sustained_total_ops += stats.interactions;
+            }
+            const gpu_sustained_ns = timer.read();
+            const gpu_sustained_ms = @as(f64, @floatFromInt(gpu_sustained_ns)) / 1_000_000.0;
+            const gpu_sustained_ops_sec = @as(f64, @floatFromInt(sustained_total_ops)) / (gpu_sustained_ms / 1000.0);
+            print("  Time: {d:.2} ms ({d} iterations)\n", .{ gpu_sustained_ms, sustained_iters });
+            print("  Total ops: {d}\n", .{sustained_total_ops});
+            print("  Sustained throughput: {d:.0} ops/sec\n", .{gpu_sustained_ops_sec});
+
+            // Compare to single-shot
+            print("  vs Single-shot: {d:.1}x\n", .{gpu_sustained_ops_sec / gpu_hetero_ops_sec});
         }
     } else {
         print("\n--- Metal GPU Benchmarks ---\n", .{});
@@ -1555,6 +2010,13 @@ fn run_benchmark() void {
         print("  Batch add: {d:.1}x\n", .{gpu_add_ops_sec / single_ops_sec});
         print("  Batch mul: {d:.1}x\n", .{gpu_mul_ops_sec / single_ops_sec});
         print("  Heap transfer: {d:.0} terms/sec\n", .{gpu_heap_ops_sec});
+        if (gpu_beta_ops_sec > 0) {
+            print("\nGPU HVM Interactions:\n", .{});
+            print("  APP-LAM (beta): {d:.0} ops/sec\n", .{gpu_beta_ops_sec});
+            print("  OP2-NUM (arith): {d:.0} ops/sec\n", .{gpu_op2_ops_sec});
+            print("  SUP-CO0 (annihilate): {d:.0} ops/sec\n", .{gpu_sup_ops_sec});
+            print("  MAT-CTR (pattern): {d:.0} ops/sec\n", .{gpu_mat_ops_sec});
+        }
     }
 
     print("\n", .{});
