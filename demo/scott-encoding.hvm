@@ -1,0 +1,134 @@
+// ============================================================================
+// Scott Encoding Demo
+// ============================================================================
+// Scott encoding represents data types using lambda functions.
+// Unlike Church encoding, Scott encoding gives O(1) pattern matching!
+//
+// Each constructor becomes a function that takes one continuation
+// per constructor and calls the appropriate one.
+
+// ============================================================================
+// Boolean: Scott vs Church
+// ============================================================================
+
+// Church: TRUE = \t.\f.t (selects first of two)
+// Scott:  TRUE = \t.\f.t (same for booleans!)
+
+// For booleans, Scott and Church coincide.
+// TRUE = \t.\f.t
+// FALSE = \t.\f.f
+
+// If-then-else is just application:
+// (TRUE #1 #0) = #1
+(((\t.\f.t) #1) #0)
+
+// ============================================================================
+// Maybe Type (Option)
+// ============================================================================
+
+// Maybe A = Nothing | Just A
+//
+// Scott encoding:
+// Nothing = \n.\j.n
+// Just x  = \n.\j.(j x)
+
+// Pattern match: (maybe nothing_case just_case)
+
+// Nothing case:
+// ((\n.\j.n) #0 (\x.x))
+(((\n.\j.n) #0) (\x.x))
+
+// Just 42 case:
+// ((\n.\j.(j x)) #0 (\x.x)) with x=42
+// But we need to substitute: Just = \x.\n.\j.(j x)
+// (((\x.\n.\j.(j x)) #42) #0 (\x.x))
+// (((\x.\n.\j.(j x)) #42) #0) (\y.(+ y #1))
+
+// ============================================================================
+// Either Type
+// ============================================================================
+
+// Either A B = Left A | Right B
+//
+// Left x  = \l.\r.(l x)
+// Right y = \l.\r.(r y)
+
+// Match on Left 42:
+// (((\x.\l.\r.(l x)) #42) (\a.(+ a #1))) (\b.(* b #2))
+// Should give: 42 + 1 = 43
+
+// ============================================================================
+// Natural Numbers (Peano)
+// ============================================================================
+
+// Nat = Zero | Succ Nat
+//
+// Zero   = \z.\s.z
+// Succ n = \z.\s.(s n)
+
+// Zero:
+// (\z.\s.z)
+
+// One = Succ Zero:
+// ((\n.\z.\s.(s n)) (\z.\s.z))
+
+// Pattern match on Zero (returns #100):
+// (((\z.\s.z) #100) (\p.#200))
+(((\z.\s.z) #100) (\p.#200))
+
+// Pattern match on Succ (returns #200):
+// ((((\n.\z.\s.(s n)) (\z.\s.z)) #100) (\p.#200))
+
+// ============================================================================
+// Pairs (Product Type)
+// ============================================================================
+
+// Pair A B = MkPair A B
+//
+// MkPair a b = \f.(f a b)
+// fst p = (p \a.\b.a)
+// snd p = (p \a.\b.b)
+
+// Create pair (1, 2):
+// ((\a.\b.\f.(f a b)) #1 #2)
+
+// Get first element:
+// (((\a.\b.\f.(f a b)) #1 #2) (\x.\y.x))
+// Should give #1
+
+// ============================================================================
+// Lists (Scott)
+// ============================================================================
+
+// List A = Nil | Cons A (List A)
+//
+// Nil        = \n.\c.n
+// Cons x xs  = \n.\c.(c x xs)
+
+// Empty list:
+// (\n.\c.n)
+
+// List [1]:
+// ((\x.\xs.\n.\c.(c x xs)) #1 (\n.\c.n))
+
+// Head of list (with default #0):
+// ((list #0) (\h.\t.h))
+
+// ============================================================================
+// Why Scott Encoding?
+// ============================================================================
+
+// 1. O(1) PATTERN MATCHING
+//    - Church encoding: O(n) for case analysis
+//    - Scott encoding: O(1) - direct dispatch
+//
+// 2. LAZY BY DEFAULT
+//    - Continuations are only called when needed
+//    - Natural fit for lazy evaluation
+//
+// 3. DIRECT COMPILATION
+//    - Maps cleanly to interaction net structures
+//    - Constructors become specific graph patterns
+//
+// HVM4's constructor tags (C00-C15) can be seen as an
+// optimized representation of Scott-encoded data!

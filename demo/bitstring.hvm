@@ -1,0 +1,97 @@
+// ============================================================================
+// Bitstring Demo - Binary Numbers as Lambda Terms
+// ============================================================================
+// Binary numbers encoded as nested lambdas with O and I constructors.
+// This is how HVM4 can represent arbitrary-precision integers!
+//
+// Encoding:
+//   E       = \e.\o.\i.e           (empty/end)
+//   O(bs)   = \e.\o.\i.(o bs)      (zero bit)
+//   I(bs)   = \e.\o.\i.(i bs)      (one bit)
+//
+// Example: 6 = 110 in binary = I(I(O(E))) = "110"
+//          5 = 101 in binary = I(O(I(E))) = "101"
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+// E (end marker) - represents empty bitstring
+// E = \e.\o.\i.e
+// ((\e.\o.\i.e) #1 #2 #3) = #1
+
+// O (zero bit) - prepends 0
+// O = \bs.\e.\o.\i.(o bs)
+
+// I (one bit) - prepends 1
+// I = \bs.\e.\o.\i.(i bs)
+
+// ============================================================================
+// Convert Bitstring to Number
+// ============================================================================
+
+// To convert, we fold with:
+//   e-case: 0
+//   o-case: \bs_val.(* bs_val #2)        -- multiply by 2
+//   i-case: \bs_val.(+ (* bs_val #2) #1) -- multiply by 2, add 1
+
+// Number 6 = I(I(O(E))) = binary 110
+// Build it: I applied to (I applied to (O applied to E))
+
+// E = \e.\o.\i.e
+// O(E) = (\bs.\e.\o.\i.(o bs)) (\e.\o.\i.e) = \e.\o.\i.(o (\e.\o.\i.e))
+// I(O(E)) = ... nested
+// I(I(O(E))) = binary 110 = 6
+
+// Let's compute 6 (110 in binary):
+// We build I(I(O(E))) and convert to number
+
+// Step by step:
+// E = \e.\o.\i.e
+// The conversion: (bitstring #0 (\x.(* x #2)) (\x.(+ (* x #2) #1)))
+
+// For simplicity, let's verify the encoding works:
+// Binary 11 = 3: I(I(E))
+// ((((\bs.\e.\o.\i.(i bs)) ((\bs.\e.\o.\i.(i bs)) (\e.\o.\i.e)))
+//   #0) (\x.(* x #2))) (\x.(+ (* x #2) #1))
+
+// Even simpler - just show the structure works:
+// ((\e.\o.\i.e) #0 (\x.#10) (\x.#20))
+// Should return #0 (the e case)
+((\e.\o.\i.e) #0 (\x.#10) (\x.#20))
+
+// ============================================================================
+// Bitstring Operations
+// ============================================================================
+
+// INCREMENT: Add 1 to a bitstring
+// inc(E) = I(E)           -- 0 + 1 = 1
+// inc(O(bs)) = I(bs)      -- ...0 + 1 = ...1
+// inc(I(bs)) = O(inc(bs)) -- ...1 + 1 = carry!
+
+// This is a RIPPLE CARRY adder in pure lambda calculus!
+
+// ADDITION: Add two bitstrings (full adder)
+// add(E, bs) = bs
+// add(bs, E) = bs
+// add(O(a), O(b)) = O(add(a,b))
+// add(O(a), I(b)) = I(add(a,b))
+// add(I(a), O(b)) = I(add(a,b))
+// add(I(a), I(b)) = O(add_carry(a,b))  -- carry!
+
+// MULTIPLICATION: Shift and add
+// mul(E, bs) = E
+// mul(O(a), b) = O(mul(a,b))      -- shift left
+// mul(I(a), b) = add(b, O(mul(a,b)))  -- add and shift
+
+// ============================================================================
+// Why This Matters
+// ============================================================================
+
+// 1. ARBITRARY PRECISION: No fixed bit width - numbers grow as needed
+// 2. OPTIMAL SHARING: Repeated computations are shared automatically
+// 3. PARALLELISM: Independent bit operations can run in parallel
+// 4. LAZY EVALUATION: Only compute bits that are actually needed
+
+// This is how languages like Haskell represent Integer internally,
+// but HVM4 does it with optimal reduction!

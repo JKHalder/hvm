@@ -1,0 +1,104 @@
+// ============================================================================
+// Structural Equality Demo
+// ============================================================================
+// HVM4 provides the (=== a b) operator for structural equality.
+// This compares two terms structurally, not just numerically.
+//
+// (=== a b) returns #1 if equal, #0 if not equal
+
+// ============================================================================
+// Numeric Equality: == vs ===
+// ============================================================================
+
+// Numeric equality (==) compares numbers:
+(== #42 #42)
+// => #1 (true)
+
+// (== #42 #43)
+// => #0 (false)
+
+// ============================================================================
+// Structural Equality (===)
+// ============================================================================
+
+// (=== a b) compares the STRUCTURE of two terms.
+// This works on any term, not just numbers.
+
+// Numbers:
+// (=== #42 #42) => #1
+
+// Same lambda structure:
+// (=== (\x.x) (\x.x)) => checks structural equality
+
+// Different structures:
+// (=== (\x.x) (\x.(x x))) => #0
+
+// ============================================================================
+// Why Structural Equality Matters
+// ============================================================================
+
+// 1. COMPARING FUNCTIONS
+//    - You can't compare functions with ==
+//    - But === can check if two lambdas have the same structure
+
+// 2. DEBUGGING
+//    - Check if reduction produced expected result
+//    - Verify transformations preserve structure
+
+// 3. MEMOIZATION
+//    - Cache results based on structural keys
+//    - Avoid recomputing identical subterms
+
+// 4. UNIFICATION
+//    - Foundation for pattern matching
+//    - Type inference uses structural comparison
+
+// ============================================================================
+// Examples
+// ============================================================================
+
+// Same number:
+// (=== #1 #1) = #1
+
+// Different numbers:
+// (=== #1 #2) = #0
+
+// Erasure equality:
+// (=== * *) = #1 (both are erasure)
+
+// Lambda equality (structural):
+// Two identity functions should be equal
+// (=== (\x.x) (\y.y))
+// Note: Variable names might affect this - depends on implementation
+
+// ============================================================================
+// Use with Conditionals
+// ============================================================================
+
+// Check equality and branch:
+// (?(!== a b) then_different else_same)
+//
+// If (=== a b) returns #1 (equal), we can use switch:
+// (?(=== #5 #5) #100 \p.#200)
+// => #100 (zero means equal, returns first branch... wait, #1 means equal)
+
+// Actually: (=== #5 #5) => #1
+// (?(=== #5 #5) #100 \p.#200)
+// If result is #1 (true/equal), switch sees non-zero, returns succ case
+// => #200
+
+// To get "if equal then X else Y":
+// Need to flip: (?(=== a b) else_case \_.then_case)
+// Or use: (?#1 else then) where #1 is from ===
+
+// ============================================================================
+// Implementation Note
+// ============================================================================
+
+// Structural equality in HVM4 uses the EQL tag (0x22).
+// It creates a special interaction that compares two term trees.
+//
+// The comparison is deep - it traverses the entire structure
+// and returns #1 only if every node matches.
+//
+// For large terms, this can be expensive. Use wisely!

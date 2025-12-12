@@ -1,0 +1,97 @@
+// ============================================================================
+// Debug Logging Demo
+// ============================================================================
+// HVM4 provides @LOG(value continuation) for debugging.
+// It prints the value and then continues with the continuation.
+//
+// This is essential for understanding reduction steps!
+
+// ============================================================================
+// Basic Logging
+// ============================================================================
+
+// @LOG(value continuation)
+// - Prints 'value' to console
+// - Then returns 'continuation'
+
+// Log 42, then return 100:
+@LOG(#42 #100)
+
+// The output will show:
+// LOG: #42
+// Result: #100
+
+// ============================================================================
+// Logging Intermediate Values
+// ============================================================================
+
+// Log the result of a computation:
+// @LOG((+ #20 #22) #0)
+// Prints: LOG: #42
+// Returns: #0
+
+// Chain multiple logs:
+// @LOG(#1 @LOG(#2 @LOG(#3 #999)))
+// Prints: LOG: #1, LOG: #2, LOG: #3
+// Returns: #999
+
+// ============================================================================
+// Debugging Reductions
+// ============================================================================
+
+// See what a lambda reduces to:
+// @LOG((\x.(+ x #1)) (\y.(* y #2)))
+
+// Log before and after:
+// \x.@LOG(x (+ x #1))
+// When applied to #5:
+// ((\x.@LOG(x (+ x #1))) #5)
+// Prints: LOG: #5
+// Returns: #6
+
+// ============================================================================
+// Tracing Execution
+// ============================================================================
+
+// Add logging to trace recursive steps:
+// Step 1: initial value
+// Step 2: after first operation
+// Step 3: after second operation
+
+// @LOG(#1 @LOG((+ #1 #1) @LOG((+ #2 #2) #4)))
+// Prints: LOG: #1, LOG: #2, LOG: #4
+// Returns: #4
+
+// ============================================================================
+// Debugging Superposition
+// ============================================================================
+
+// Log both branches of a superposition:
+// &0{@LOG(#1 #1), @LOG(#2 #2)}
+// Should print both LOG: #1 and LOG: #2
+
+// ============================================================================
+// Practical Debugging Patterns
+// ============================================================================
+
+// 1. CHECKPOINT: Verify a value at a point
+//    @LOG(checkpoint_value rest_of_computation)
+
+// 2. TRACE: Follow the flow of data
+//    \x.@LOG(x (process x))
+
+// 3. VALIDATE: Check assumptions
+//    @LOG((== expected actual) continuation)
+
+// 4. INSPECT: See complex structures
+//    @LOG(complex_term simple_result)
+
+// ============================================================================
+// Note on Performance
+// ============================================================================
+
+// @LOG has overhead - it interrupts the reducer to print.
+// Remove logging calls for production/benchmarks.
+//
+// The LOG_F function ID (0x02) is handled specially by
+// the HVM4 runtime to perform the side effect.

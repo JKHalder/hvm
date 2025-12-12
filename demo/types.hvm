@@ -1,0 +1,105 @@
+// ============================================================================
+// Type Annotations Demo
+// ============================================================================
+// HVM4 includes a type system based on the Interaction Calculus of
+// Constructions (ICC). Types are first-class values that can be
+// computed and passed around.
+//
+// Syntax: {term : Type}
+
+// ============================================================================
+// Basic Type Annotation
+// ============================================================================
+
+// Annotate a number with a type:
+{#42 : Type}
+
+// The annotation {t : T} creates an ANN node that pairs a term
+// with its type. This can be used for:
+// - Documentation
+// - Type checking (when implemented)
+// - Dependent types
+
+// ============================================================================
+// Type Universe
+// ============================================================================
+
+// Type is the universe of types:
+// Type : Type  (Type has type Type)
+
+// This is the starting point for the type hierarchy.
+// In a full dependent type system, we'd have:
+// Type0 : Type1 : Type2 : ...
+
+// Annotate Type itself:
+// {Type : Type}
+
+// ============================================================================
+// Function Types (Future)
+// ============================================================================
+
+// HVM4 includes primitives for dependent function types:
+//
+// ALL (Π): Dependent function type
+//   Π(A).B means "for all x:A, B(x)"
+//   Non-dependent: A -> B = Π(A).(λ_.B)
+//
+// SIG (Σ): Dependent pair type
+//   Σ(A).B means "exists x:A such that B(x)"
+//
+// SLF: Self-type
+//   For encoding inductive types
+
+// ============================================================================
+// Type-Level Computation
+// ============================================================================
+
+// In ICC, types can be computed:
+// - A type can depend on a value
+// - Functions can return types
+// - Types can be stored in data structures
+
+// Example concept:
+// Vec : Nat -> Type -> Type
+// Vec 0 A = Unit
+// Vec (S n) A = (A, Vec n A)
+
+// The length is part of the type!
+
+// ============================================================================
+// Interaction Calculus of Constructions
+// ============================================================================
+
+// ICC combines:
+// 1. Lambda calculus (computation)
+// 2. Dependent types (specifications)
+// 3. Interaction nets (optimal reduction)
+
+// Key insight: Types can be reduced using the same interaction
+// rules as terms. Type checking becomes graph reduction!
+
+// ============================================================================
+// Simple Typed Example
+// ============================================================================
+
+// Identity function with type:
+// id : (A : Type) -> A -> A
+// id = \A.\x.x
+
+// In HVM4 syntax (conceptually):
+// {\A.\x.x : Type}
+
+// For now, let's just show annotation works:
+{(\x.x) : Type}
+
+// ============================================================================
+// Why Types Matter for HVM4
+// ============================================================================
+
+// 1. SAFETY: Catch errors before execution
+// 2. OPTIMIZATION: Types guide specialization
+// 3. DOCUMENTATION: Types describe behavior
+// 4. PARALLELISM: Types can indicate independence
+
+// The type system is integrated at the interaction net level,
+// enabling type-directed optimizations during reduction.

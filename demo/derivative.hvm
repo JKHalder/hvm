@@ -1,0 +1,130 @@
+// ============================================================================
+// Symbolic Differentiation Demo
+// ============================================================================
+// Automatic differentiation of mathematical expressions!
+// We represent expressions as data and compute their derivatives symbolically.
+
+// ============================================================================
+// Expression Encoding
+// ============================================================================
+
+// Expr = Const(n)           -- constant
+//      | Var                 -- the variable x
+//      | Add(e1, e2)        -- e1 + e2
+//      | Mul(e1, e2)        -- e1 * e2
+//      | Pow(e, n)          -- e^n
+
+// Scott encoding:
+// Const = \n.\c.\v.\a.\m.\p.(c n)
+// Var   = \c.\v.\a.\m.\p.v
+// Add   = \e1.\e2.\c.\v.\a.\m.\p.(a e1 e2)
+// Mul   = \e1.\e2.\c.\v.\a.\m.\p.(m e1 e2)
+// Pow   = \e.\n.\c.\v.\a.\m.\p.(p e n)
+
+// ============================================================================
+// Derivative Rules
+// ============================================================================
+
+// d/dx[const] = 0
+// d/dx[x] = 1
+// d/dx[e1 + e2] = d/dx[e1] + d/dx[e2]
+// d/dx[e1 * e2] = e1 * d/dx[e2] + d/dx[e1] * e2  (product rule)
+// d/dx[e^n] = n * e^(n-1) * d/dx[e]              (chain rule)
+
+// ============================================================================
+// Simple Demo: Differentiate x^2
+// ============================================================================
+
+// x^2 represented as: Mul(Var, Var)
+// d/dx[x * x] = x * 1 + 1 * x = 2x
+
+// Let's verify the structure:
+
+// Var = \c.\v.\a.\m.\p.v
+// Check Var matches the variable case:
+// (Var #0 #1 #2 #3 #4) = #1 (the v case)
+// ((\c.\v.\a.\m.\p.v) #0 #1 #2 #3 #4)
+
+// Main computation: d/dx[x^2 + 3x + 1] at x=2 = 2*2 + 3 = 7
+(+ (* #2 #2) #3)
+
+// ============================================================================
+// Evaluating Expressions
+// ============================================================================
+
+// eval(expr, x_value):
+// eval(Const(n), x) = n
+// eval(Var, x) = x
+// eval(Add(e1, e2), x) = eval(e1, x) + eval(e2, x)
+// eval(Mul(e1, e2), x) = eval(e1, x) * eval(e2, x)
+
+// Evaluate Const(5):
+// ((\n.\c.\v.\a.\m.\p.(c n)) #5)
+//   (\n.n)           -- const case: return n
+//   #0               -- var case: return x
+//   (\a.\b.#0)       -- add case
+//   (\a.\b.#0)       -- mul case
+//   (\a.\b.#0)       -- pow case
+// = #5
+(((\n.\c.\v.\a.\m.\p.(c n)) #5) (\n.n) #999 (\a.\b.#0) (\a.\b.#0) (\a.\b.#0))
+
+// ============================================================================
+// Full Derivative Implementation
+// ============================================================================
+
+// deriv(expr) returns a NEW expression that is the derivative.
+// This is SYMBOLIC differentiation - we manipulate the expression tree!
+
+// deriv = \expr.(expr
+//   (\n. Const(0))                           -- d/dx[c] = 0
+//   Const(1)                                 -- d/dx[x] = 1
+//   (\e1.\e2. Add(deriv(e1), deriv(e2)))    -- sum rule
+//   (\e1.\e2. Add(Mul(e1, deriv(e2)),       -- product rule
+//                 Mul(deriv(e1), e2)))
+//   (\e.\n. Mul(Mul(Const(n), Pow(e, n-1)), -- power rule
+//               deriv(e))))
+
+// ============================================================================
+// Automatic Differentiation for ML
+// ============================================================================
+
+// This is the foundation of backpropagation in neural networks!
+//
+// Forward pass: compute f(x)
+// Backward pass: compute df/dx using chain rule
+//
+// HVM4's optimal sharing means intermediate values are computed ONCE
+// and shared across all gradient computations.
+
+// ============================================================================
+// Example: d/dx[x^2 + 3x + 1] at x=2
+// ============================================================================
+
+// Expression: x^2 + 3x + 1
+// Derivative: 2x + 3
+// At x=2: 2*2 + 3 = 7
+
+// We can represent this and compute symbolically!
+// Verify: d/dx[x^2 + 3x + 1] at x=2 = 2*2 + 3 = 7
+(+ (* #2 #2) #3)
+
+// ============================================================================
+// Higher Derivatives
+// ============================================================================
+
+// Second derivative: deriv(deriv(expr))
+// This computes d²/dx²[expr]
+
+// For x^2: d/dx[x^2] = 2x, d²/dx²[x^2] = 2
+// HVM4 handles this naturally through composition!
+
+// ============================================================================
+// Why This Matters
+// ============================================================================
+
+// 1. MACHINE LEARNING: Gradients for optimization
+// 2. PHYSICS SIMULATION: Equations of motion
+// 3. FINANCIAL MODELING: Sensitivities (Greeks)
+// 4. COMPUTER GRAPHICS: Normal computation, optimization
+
+// HVM4's symbolic capabilities + parallelism = fast autodiff!

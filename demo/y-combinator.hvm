@@ -1,0 +1,83 @@
+// ============================================================================
+// Y Combinator Demo - Recursion Without Recursion
+// ============================================================================
+// The Y combinator enables recursion in the untyped lambda calculus.
+// It finds the "fixed point" of a function: Y f = f (Y f)
+//
+// Y = \f.(\x.(f (x x))) (\x.(f (x x)))
+//
+// WARNING: The classic Y combinator causes infinite expansion in
+// strict evaluation. HVM4 uses lazy interaction nets, but we still
+// need to be careful with recursive structures.
+
+// ============================================================================
+// Fixed Point Concept
+// ============================================================================
+
+// A fixed point of f is a value x where f(x) = x
+// For functions, Y gives us: Y(f) = f(Y(f))
+//
+// This means: (Y factorial) = factorial (Y factorial)
+// The function can "call itself" through the fixed point!
+
+// ============================================================================
+// Omega Combinator (Diverges!)
+// ============================================================================
+
+// omega = \x.(x x)
+// Omega = omega omega = infinite loop
+//
+// DON'T RUN THIS - it will loop forever:
+// ((\x.(x x)) (\x.(x x)))
+
+// ============================================================================
+// Safe Self-Application
+// ============================================================================
+
+// We can have controlled self-application:
+// (\x.#42) applied to anything gives #42
+((\x.#42) (\x.#42))
+
+// Self-application that terminates:
+// (\x.(+ #1 #1)) (\y.y)
+((\x.(+ #1 #1)) (\y.y))
+
+// ============================================================================
+// Z Combinator (Strict Y)
+// ============================================================================
+
+// For strict languages, we use Z instead of Y:
+// Z = \f.(\x.f(\v.((x x) v))) (\x.f(\v.((x x) v)))
+//
+// The extra \v. delays evaluation, preventing infinite expansion.
+//
+// In HVM4, we can use function definitions for cleaner recursion:
+// @fact(n) = (?n #1 \p.(* (+ p #1) @fact(p)))
+
+// ============================================================================
+// Practical Recursion in HVM4
+// ============================================================================
+
+// Using numeric switch for bounded recursion:
+// This computes 3 + 2 + 1 + 0 = 6 (sum from 0 to 3)
+
+// Base case: if n=0, return 0
+// Recursive: return n + sum(n-1)
+
+// Unrolled for n=3:
+// (?#3 #0 \p.(+ (+ p #1) (?p #0 \q.(+ (+ q #1) (?q #0 \r.#0)))))
+
+// Simpler: just show switch working
+(?#3 #0 \p.(+ p #1))
+
+// ============================================================================
+// Church Numeral Iteration (Safe Recursion)
+// ============================================================================
+
+// Church numerals give us safe iteration:
+// three f x = f (f (f x))
+//
+// (((\f.\x.(f (f (f x)))) (\n.(+ n #1))) #0) = #3
+
+// This is recursion without explicit recursion!
+// The number itself controls how many times f is applied.

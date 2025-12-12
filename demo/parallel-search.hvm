@@ -1,0 +1,133 @@
+// ============================================================================
+// Parallel Search Demo - SAT-like Exploration with Superposition
+// ============================================================================
+// This demo shows how HVM4's superposition enables PARALLEL SEARCH.
+// Instead of trying one value at a time, we try ALL values at once!
+//
+// This is like a SAT solver that explores the entire search space
+// in parallel using the magic of superposition.
+
+// ============================================================================
+// The Key Insight
+// ============================================================================
+
+// In traditional programming:
+//   for x in [0,1]:
+//     for y in [0,1]:
+//       for z in [0,1]:
+//         if f(x,y,z): return (x,y,z)
+//
+// This is O(2^n) sequential steps.
+//
+// In HVM4 with superposition:
+//   x = &{0, 1}
+//   y = &{0, 1}
+//   z = &{0, 1}
+//   f(x, y, z)
+//
+// ALL 8 combinations evaluated IN PARALLEL!
+
+// ============================================================================
+// Boolean Superposition
+// ============================================================================
+
+// A "superposition boolean" that is BOTH true and false:
+// bool = &0{#0, #1}
+
+// When we use it, both branches are explored:
+// (if bool then A else B) => &{A, B}
+
+// ============================================================================
+// Simple Example: Find x where x * x = 4
+// ============================================================================
+
+// x is in superposition: could be 1, 2, 3, or 4
+// We use nested superpositions to represent multiple choices:
+
+// x = &0{#1, &1{#2, &2{#3, #4}}}
+// This represents: x ∈ {1, 2, 3, 4}
+
+// Now compute x * x for ALL values simultaneously:
+// (* x x) where x = &0{#1, &1{#2, &2{#3, #4}}}
+
+// Let's verify with just two values:
+// x = &0{#2, #3}
+// x * x = &0{#4, #9}
+// ((\x.(* x x)) &0{#2, #3})
+
+// Show parallel OR computation: all 4 combinations of a,b
+// Result is superposition of all outputs
+(+ (| &0{#0, #1} &1{#0, #1}) #100)
+
+// ============================================================================
+// Parallel Constraint Checking
+// ============================================================================
+
+// Check: which x in {1,2,3,4,5} satisfies x + x = 8?
+// Answer: x = 4
+
+// We can represent the search space:
+// x = &0{#1, &1{#2, &2{#3, &3{#4, #5}}}}
+
+// Then check (== (+ x x) #8) for all x simultaneously!
+// The result will be a superposition of #0s and #1s,
+// with #1 in the branch where x=4.
+
+// ============================================================================
+// 3-SAT Style Search
+// ============================================================================
+
+// Problem: Find a, b, c in {0,1} such that:
+//   (a OR b) AND (NOT b OR c) AND (a OR NOT c)
+
+// In HVM4:
+// a = &0{#0, #1}
+// b = &1{#0, #1}
+// c = &2{#0, #1}
+
+// OR: (| a b) -- bitwise OR on 0/1
+// AND: (& a b) -- bitwise AND
+// NOT: (^ x #1) -- XOR with 1 flips the bit
+
+// clause1 = (| a b)
+// clause2 = (| (^ b #1) c)
+// clause3 = (| a (^ c #1))
+// result = (& clause1 (& clause2 clause3))
+
+// All 8 combinations of (a,b,c) evaluated in parallel!
+// Satisfying assignments will have result = #1
+
+// Simplified: Check one clause with superposition
+// a OR b where a,b ∈ {0,1}
+((\a.\b.(| a b)) &0{#0, #1} &1{#0, #1})
+
+// ============================================================================
+// Exponential Parallelism
+// ============================================================================
+
+// With n boolean variables in superposition:
+// - 2^n parallel branches
+// - Each branch evaluated independently
+// - Work-stealing balances load across CPU cores
+// - Potentially EXPONENTIAL speedup!
+
+// This is why HVM4 can be faster than traditional interpreters
+// for search problems - it's doing parallel SAT solving!
+
+// ============================================================================
+// The Catch: Exponential Space
+// ============================================================================
+
+// While computation is parallel, the RESULT can be exponential:
+// - 2^n branches means 2^n results
+// - Memory usage grows exponentially
+//
+// This is where COLLAPSE (duplication) matters:
+// - Same-label DUP+SUP annihilate
+// - Careful label management avoids blowup
+// - This is the "oracle problem" mentioned in HVM4 docs
+
+// For practical SAT solving, you'd want to:
+// 1. Use superposition for parallel exploration
+// 2. Collapse early when a solution is found
+// 3. Prune unsatisfiable branches
