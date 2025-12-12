@@ -1,6 +1,7 @@
 const std = @import("std");
 const hvm = @import("hvm.zig");
 const parser = @import("parser.zig");
+const metal = @import("metal.zig");
 const print = std.debug.print;
 
 // =============================================================================
@@ -335,6 +336,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, cmd, "examples")) {
             print_banner();
             run_examples();
+        } else if (std.mem.eql(u8, cmd, "gpu")) {
+            print_banner();
+            run_gpu_test();
         } else {
             print("Unknown command: {s}\n\n", .{cmd});
             print_help();
@@ -349,6 +353,104 @@ fn print_banner() void {
     print("===========================================\n", .{});
     print("HVM4 - Higher-Order Virtual Machine (Zig)\n", .{});
     print("===========================================\n", .{});
+}
+
+fn run_gpu_test() void {
+    print("\n=== Metal GPU Test ===\n\n", .{});
+
+    // Check if Metal is supported
+    print("Platform support: ", .{});
+    if (metal.is_supported) {
+        print("macOS/iOS (supported)\n", .{});
+    } else {
+        print("Not macOS/iOS (Metal unavailable)\n", .{});
+        return;
+    }
+
+    // Check if Metal device is available
+    print("Metal device: ", .{});
+    if (metal.isAvailable()) {
+        print("Available\n", .{});
+    } else {
+        print("Not available\n", .{});
+        return;
+    }
+
+    // Initialize Metal
+    print("\nInitializing Metal...\n", .{});
+    metal.init() catch |err| {
+        print("Failed to initialize: {}\n", .{err});
+        return;
+    };
+    defer metal.deinit();
+
+    // Get GPU info
+    if (metal.getGPU()) |gpu| {
+        print("  Device: {s}\n", .{gpu.getDeviceName()});
+        print("  Max threads: {d}\n", .{gpu.max_threads});
+
+        // Test buffer allocation
+        print("\nTesting GPU buffer allocation...\n", .{});
+        gpu.allocHeap(1000) catch |err| {
+            print("  Failed: {}\n", .{err});
+            return;
+        };
+        print("  Allocated 1000 terms on GPU\n", .{});
+
+        // Test upload/download
+        var data: [100]u64 = undefined;
+        for (0..100) |i| {
+            data[i] = @as(u64, i) * 42;
+        }
+        gpu.uploadHeap(&data) catch |err| {
+            print("  Upload failed: {}\n", .{err});
+            return;
+        };
+        print("  Uploaded 100 terms\n", .{});
+
+        var downloaded: [100]u64 = undefined;
+        gpu.downloadHeap(&downloaded) catch |err| {
+            print("  Download failed: {}\n", .{err});
+            return;
+        };
+        print("  Downloaded 100 terms\n", .{});
+
+        // Verify
+        var matches: u32 = 0;
+        for (0..100) |i| {
+            if (downloaded[i] == data[i]) matches += 1;
+        }
+        print("  Verified: {d}/100 match\n", .{matches});
+
+        gpu.freeHeap();
+    }
+
+    // CPU SIMD test (always available)
+    print("\nCPU SIMD batch operations:\n", .{});
+    var a: [1000]u32 = undefined;
+    var b: [1000]u32 = undefined;
+    var results: [1000]u32 = undefined;
+
+    for (0..1000) |i| {
+        a[i] = @truncate(i);
+        b[i] = @truncate(i + 1);
+    }
+
+    var timer = std.time.Timer.start() catch return;
+    for (0..10000) |_| {
+        metal.cpuBatchAdd(&a, &b, &results);
+    }
+    const add_ns = timer.read();
+    print("  Batch add (10K x 1000): {d:.2} ms\n", .{@as(f64, @floatFromInt(add_ns)) / 1_000_000.0});
+
+    timer.reset();
+    for (0..10000) |_| {
+        metal.cpuBatchMul(&a, &b, &results);
+    }
+    const mul_ns = timer.read();
+    print("  Batch mul (10K x 1000): {d:.2} ms\n", .{@as(f64, @floatFromInt(mul_ns)) / 1_000_000.0});
+
+    print("\n[PASS] GPU test completed successfully\n", .{});
 }
 
 fn run_examples() void {

@@ -1,0 +1,69 @@
+// ============================================================================
+// Optimal Duplication Demo
+// ============================================================================
+// HVM4 implements OPTIMAL sharing from the Interaction Net model.
+// When you need to use a value twice, duplication is EXPLICIT and OPTIMAL.
+//
+// Syntax: !&L{x, y} = value; body
+// This duplicates 'value' into variables 'x' and 'y' with label L
+//
+// The magic: if the value is also a superposition with the SAME label,
+// they ANNIHILATE in O(1) time instead of duplicating!
+
+// Basic duplication: use a value twice
+// In HVM4, we can show optimal sharing with superposition
+
+// Simple: add two numbers
+(+ #42 #42)
+
+// ============================================================================
+// Optimal Annihilation (Same Labels)
+// ============================================================================
+
+// When DUP and SUP have the SAME label, they cancel out efficiently:
+// !&0{a, b} = &0{x, y}; body
+// => body with a=x, b=y (O(1) operation!)
+
+// This is the key to optimal lambda calculus evaluation!
+// !&0{a, b} = &0{#1, #2}; (+ a b)
+// => (+ #1 #2)  [direct extraction, no copying!]
+// => #3
+// !&0{a, b} = &0{#1, #2}; (+ a b)
+
+// ============================================================================
+// Commutation (Different Labels)
+// ============================================================================
+
+// When labels differ, a 2x2 grid is created (potential exponential blowup):
+// !&0{a, b} = &1{x, y}; ...
+// Creates connections that may need to be resolved later
+
+// !&0{a, b} = &1{#1, #2}; (+ a b)
+// This triggers commutation - both paths explored
+// !&0{a, b} = &1{#1, #2}; (+ a b)
+
+// ============================================================================
+// Why Optimal?
+// ============================================================================
+// In traditional lambda calculus:
+// - Duplicating (\x.x x) requires copying the entire term
+// - Exponential blowup is common
+//
+// In HVM4:
+// - Same-label SUP+DUP annihilate in O(1)
+// - Sharing is maximized
+// - Many exponential algorithms become polynomial!
+//
+// This is why HVM4 can evaluate some programs exponentially faster
+// than traditional implementations.
+
+// ============================================================================
+// Duplication with Computation
+// ============================================================================
+
+// Duplicate a computation result:
+// !&0{x, y} = (+ #10 #5); (* x y)
+// => !&0{x, y} = #15; (* x y)
+// => (* #15 #15)
+// => #225
+// !&0{x, y} = (+ #10 #5); (* x y)

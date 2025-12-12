@@ -1,0 +1,89 @@
+// ============================================================================
+// Church-Encoded Lists Demo
+// ============================================================================
+// Lists can be encoded using lambdas (Scott encoding):
+//
+// NIL  = \n.\c.n              (empty list)
+// CONS = \h.\t.\n.\c.((c h) t) (prepend element)
+//
+// A list [1,2,3] = CONS 1 (CONS 2 (CONS 3 NIL))
+
+// ============================================================================
+// Basic List Construction
+// ============================================================================
+
+// NIL - the empty list
+// nil = \n.\c.n
+// When we "fold" over nil, we get the nil-case value
+
+// CONS - prepend an element
+// cons = \h.\t.\n.\c.((c h) t)
+
+// List [42] = cons 42 nil
+// ((\h.\t.\n.\c.((c h) t)) #42 (\n.\c.n))
+
+// ============================================================================
+// List Operations
+// ============================================================================
+
+// HEAD - get first element
+// head = \list.((list #0) (\h.\t.h))
+// head [42] = 42
+
+// Get head of [42]:
+// (((\h.\t.\n.\c.((c h) t) #42 (\n.\c.n)) #0) (\h.\t.h))
+
+// TAIL - get rest of list
+// tail = \list.((list nil) (\h.\t.t))
+
+// IS_NIL - check if empty
+// isnil = \list.((list #1) (\h.\t.#0))
+// isnil nil = #1, isnil (cons x xs) = #0
+
+// isnil nil:
+// (((\n.\c.n) #1) (\h.\t.#0))
+(((\n.\c.n) #1) (\h.\t.#0))
+
+// ============================================================================
+// Folding Over Lists
+// ============================================================================
+
+// The Church encoding IS the fold!
+// (list nil-value cons-function)
+
+// Sum a list: fold with (+) and 0
+// sum [1,2,3] = ((((cons 1 (cons 2 (cons 3 nil))) #0) (\h.\t.(+ h t)))
+
+// Length of a list: fold with (\h.\t.(+ #1 t)) and 0
+
+// ============================================================================
+// List with Superposition - Parallel Map!
+// ============================================================================
+
+// A superposition of lists processes BOTH lists in parallel:
+// &0{[1,2], [3,4]}
+// Mapping over this processes both lists simultaneously!
+
+// This is how HVM4 achieves parallel list processing without
+// explicit threading - superposition handles it automatically.
+
+// &0{#1, #2} represents either 1 or 2
+// A list containing superposition: cons &0{#1,#2} nil
+// This represents TWO lists at once: [1] and [2]
+
+// ============================================================================
+// Native Numbers as List (Peano-style)
+// ============================================================================
+
+// HVM4's switch gives us natural number recursion:
+// (?n base \pred.step)
+//
+// This is like folding over a number:
+// fold_nat n base step = if n=0 then base else step(fold_nat (n-1) base step)
+
+// Sum 1 to n using switch:
+// sum_to 0 = 0
+// sum_to n = n + sum_to(n-1)
+
+// For n=3: 3 + 2 + 1 + 0 = 6
+// We need recursion via functions for this - see the function definition syntax

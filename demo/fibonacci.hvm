@@ -1,0 +1,46 @@
+// ============================================================================
+// Fibonacci Demo
+// ============================================================================
+// Fibonacci sequence using HVM4's numeric switch for recursion.
+// The switch (?n zero succ) checks if n is zero:
+//   - If n = 0: returns zero
+//   - If n > 0: calls succ with (n-1)
+
+// Fibonacci using switch recursion
+// fib(0) = 0
+// fib(1) = 1
+// fib(n) = fib(n-1) + fib(n-2)
+
+// We define fib as a recursive function using the Y combinator pattern
+// with switch for the base cases
+
+// Simple approach: manually unroll for small numbers
+
+// fib(0) = 0
+// (?#0 #0 \p.#1)
+
+// fib(1) = 1
+// (?#1 #0 \p.(?p #1 \q.(+ #1 #1)))
+
+// fib(5) computed step by step:
+// This demonstrates HVM4's switch-based recursion
+// (?#5 #0 \p.(?p #1 \q.#42)) // placeholder - real recursion needs @functions
+
+// For now, let's show the switch mechanism:
+// If n=0, return 0. If n=1, return 1. Otherwise compute.
+
+// Switch demo: returns different values based on input
+// (?#0 #100 \p.#200) = #100 (zero case)
+(?#0 #100 \p.#200)
+
+// (?#5 #100 \p.#200) = #200 (successor case, p=4)
+// (?#5 #100 \p.#200)
+
+// (?#5 #100 \p.(+ p #1)) = #5 (p is n-1, so p+1 = n)
+// (?#5 #100 \p.(+ p #1))
+
+// Nested switch for fib(2):
+// If n=0: 0
+// If n=1: 1
+// Else: need recursion (which requires @function definitions)
+// (?#2 #0 \p.(?p #1 \q.#1))

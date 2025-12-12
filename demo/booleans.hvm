@@ -1,0 +1,76 @@
+// ============================================================================
+// Church Booleans Demo
+// ============================================================================
+// Church booleans encode true/false as lambda functions:
+//
+// TRUE  = \t.\f.t  (returns first argument)
+// FALSE = \t.\f.f  (returns second argument)
+//
+// A boolean acts as an if-then-else: (bool then else)
+
+// ============================================================================
+// Basic Booleans
+// ============================================================================
+
+// TRUE: returns first argument
+// ((\t.\f.t) #1 #0) = #1
+(((\t.\f.t) #1) #0)
+
+// FALSE: returns second argument
+// ((\t.\f.f) #1 #0) = #0
+// (((\t.\f.f) #1) #0)
+
+// ============================================================================
+// Boolean Operations
+// ============================================================================
+
+// NOT = \b.((b FALSE) TRUE) = \b.\t.\f.((b f) t)
+// NOT TRUE = FALSE, NOT FALSE = TRUE
+
+// not = \b.\t.\f.((b f) t)
+// (not true) #1 #0 should give #0
+// (((\b.\t.\f.((b f) t)) (\x.\y.x)) #1 #0)
+
+// AND = \a.\b.((a b) FALSE) = \a.\b.((a b) (\x.\y.y))
+// TRUE AND TRUE = TRUE
+// TRUE AND FALSE = FALSE
+// FALSE AND anything = FALSE
+
+// and = \a.\b.((a b) (\x.\y.y))
+// (and true true) #1 #0 should give #1
+// ((((\a.\b.((a b) (\x.\y.y))) (\p.\q.p)) (\r.\s.r)) #1 #0)
+
+// OR = \a.\b.((a TRUE) b) = \a.\b.((a (\x.\y.x)) b)
+// TRUE OR anything = TRUE
+// FALSE OR b = b
+
+// or = \a.\b.((a (\x.\y.x)) b)
+// (or false true) #1 #0 should give #1
+// ((((\a.\b.((a (\x.\y.x)) b)) (\p.\q.q)) (\r.\s.r)) #1 #0)
+
+// ============================================================================
+// Conditional Expressions
+// ============================================================================
+
+// if-then-else is just application!
+// (bool then else)
+
+// If true then 42 else 0
+// (((\t.\f.t) #42) #0) = #42
+// (((\t.\f.t) #42) #0)
+
+// If false then 42 else 0
+// (((\t.\f.f) #42) #0) = #0
+// (((\t.\f.f) #42) #0)
+
+// ============================================================================
+// Comparison to Numbers
+// ============================================================================
+// HVM4 also has native number comparison:
+// (== #5 #5) => #1 (true)
+// (== #5 #3) => #0 (false)
+
+// Convert native bool to Church bool:
+// (?native_bool TRUE FALSE)
+// (?#1 (\t.\f.t) (\t.\f.f)) = TRUE
+// (?(== #5 #5) (\t.\f.t) (\t.\f.f))

@@ -1,0 +1,49 @@
+// ============================================================================
+// Church Numerals Demo
+// ============================================================================
+// Church numerals encode natural numbers as lambda functions.
+// A number N is represented as a function that applies f to x, N times.
+//
+// 0 = \f.\x.x           (apply f zero times)
+// 1 = \f.\x.(f x)       (apply f once)
+// 2 = \f.\x.(f (f x))   (apply f twice)
+// 3 = \f.\x.(f (f (f x))) (apply f three times)
+
+// Church zero: \f.\x.x
+// Applied to successor and 0, gives 0
+// (((\f.\x.x) (\n.(+ n #1))) #0)
+
+// Church one: \f.\x.(f x)
+// Applied to successor and 0, gives 1
+// (((\f.\x.(f x)) (\n.(+ n #1))) #0)
+
+// Church two: \f.\x.(f (f x))
+// Applied to successor and 0, gives 2
+// (((\f.\x.(f (f x))) (\n.(+ n #1))) #0)
+
+// Simple Church encoding check - apply increment twice to 0
+// (\n.(+ n #1)) applied twice to #0 = #2
+((\n.(+ n #1)) ((\n.(+ n #1)) #0))
+
+// Church three: \f.\x.(f (f (f x)))
+// Applied to successor and 0, gives 3
+// (((\f.\x.(f (f (f x)))) (\n.(+ n #1))) #0)
+
+// ============================================================================
+// Church Arithmetic
+// ============================================================================
+
+// Successor: adds one to a Church numeral
+// succ = \n.\f.\x.(f ((n f) x))
+// succ(2) applied to (+1) and 0 gives 3
+// ((((\n.\f.\x.(f ((n f) x))) (\f.\x.(f (f x)))) (\n.(+ n #1))) #0)
+
+// Addition: m + n = \f.\x.((m f) ((n f) x))
+// add = \m.\n.\f.\x.((m f) ((n f) x))
+// 2 + 3 = 5
+// (((((\m.\n.\f.\x.((m f) ((n f) x))) (\f.\x.(f (f x)))) (\f.\x.(f (f (f x))))) (\n.(+ n #1))) #0)
+
+// Multiplication: m * n = \f.(m (n f))
+// mul = \m.\n.\f.(m (n f))
+// 2 * 3 = 6
+// ((((\m.\n.\f.(m (n f))) (\f.\x.(f (f x)))) (\f.\x.(f (f (f x))))) (\n.(+ n #1)) #0)

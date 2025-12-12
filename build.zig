@@ -22,6 +22,13 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_module,
     });
 
+    // On macOS, link Metal and Objective-C runtime for GPU support
+    if (target.result.os.tag == .macos) {
+        exe.linkFramework("Metal");
+        exe.linkFramework("Foundation");
+        exe.linkSystemLibrary("objc");
+    }
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

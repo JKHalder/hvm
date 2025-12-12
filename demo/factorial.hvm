@@ -1,0 +1,44 @@
+// ============================================================================
+// Factorial Demo
+// ============================================================================
+// Factorial using HVM4's numeric switch for recursion.
+// fact(0) = 1
+// fact(n) = n * fact(n-1)
+
+// Using switch: (?n zero_case \pred.succ_case)
+// - If n = 0: return zero_case
+// - If n > 0: return succ_case with pred = n-1
+
+// Factorial of 0 = 1
+// (?#0 #1 \p.(* (+ p #1) #1))
+
+// Factorial of 1 = 1
+// n=1: not zero, so we get p=0, then (0+1) * fact(0) = 1 * 1 = 1
+// (?#1 #1 \p.#1)
+
+// For proper recursion we need function definitions, but we can show
+// the pattern with manually expanded small cases:
+
+// fact(3) = 3 * 2 * 1 * 1 = 6
+// Manual expansion:
+// (?#3 #1 \p2.
+//   (* (+ p2 #1)
+//      (?p2 #1 \p1.
+//        (* (+ p1 #1)
+//           (?p1 #1 \p0.#1)))))
+
+// Simpler: just demonstrate the switch pattern
+// (?#3 #1 \p.(* (+ p #1) #6))  // If we knew fact(2)=2, this gives 3*2=6
+// (?#3 #1 \p.(+ p #1))  // This shows p = 2 when n = 3
+
+// Show that switch correctly computes predecessor:
+(?#5 #999 \p.p)
+// Result: #4 (the predecessor of 5)
+
+// Compute 5! = 120 with explicit unrolling:
+// (* #5 (* #4 (* #3 (* #2 (* #1 #1)))))
+// (* #5 (* #4 (* #3 (* #2 #1))))
+// (* #5 (* #4 (* #3 #2)))
+// (* #5 (* #4 #6))
+// (* #5 #24)
+// = #120

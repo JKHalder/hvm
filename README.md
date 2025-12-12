@@ -21,6 +21,7 @@ A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interac
 - **Lock-Free Reduction**: AtomicHeap with CAS-based parallel reduction
 - **Supercombinators**: Pre-compiled S, K, B, C combinators and Church numeral optimizations
 - **Compiled Reducer**: Direct-threaded dispatch with comptime-generated handler tables (5x speedup)
+- **Metal GPU Acceleration**: Pure Zig Metal bindings for macOS GPU compute (Apple Silicon)
 
 ## Building
 
@@ -51,6 +52,9 @@ zig build -Doptimize=ReleaseFast
 
 # Run benchmarks
 ./zig-out/bin/hvm4 bench
+
+# Test Metal GPU (macOS only)
+./zig-out/bin/hvm4 gpu
 
 # Show syntax examples
 ./zig-out/bin/hvm4 examples

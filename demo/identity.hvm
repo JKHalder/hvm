@@ -1,0 +1,36 @@
+// ============================================================================
+// Identity Function Demo
+// ============================================================================
+// The identity function is the simplest lambda: it returns its argument unchanged.
+// Syntax: \x.body (backslash for lambda)
+
+// Identity function applied to 42
+// (\x.x) is the identity function
+// When applied to #42, it returns #42
+((\x.x) #42)
+
+// Identity applied to a computation
+// (\x.x) applied to (3 + 4) should give 7
+// ((\x.x) (+ #3 #4))
+
+// Nested identity - still returns the argument
+// ((\x.(\y.y)) #1 #2) = #2
+// ((\x.(\y.y)) #1 #2)
+
+// Constant function - always returns first argument
+// (\x.\y.x) applied to #1 and #2 gives #1
+// (((\x.\y.x) #1) #2)
+
+// ============================================================================
+// Higher-Order Functions
+// ============================================================================
+
+// Apply: takes a function and an argument, applies f to x
+// (\f.\x.(f x)) applied to identity and 42
+// (((\f.\x.(f x)) (\y.y)) #42)
+
+// Compose: (f . g) x = f(g(x))
+// compose = \f.\g.\x.(f (g x))
+// (((\f.\g.\x.(f (g x))) (\x.(+ x #1))) (\x.(* x #2))) applied to #5
+// = (5 * 2) + 1 = 11
+// ((((\f.\g.\x.(f (g x))) (\x.(+ x #1))) (\x.(* x #2))) #5)

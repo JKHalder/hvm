@@ -1,0 +1,65 @@
+// ============================================================================
+// Superposition Demo - HVM4's Killer Feature
+// ============================================================================
+// Superposition is what makes HVM4 unique: it enables AUTOMATIC PARALLELISM.
+//
+// A superposition &L{a, b} represents TWO values at once - like quantum
+// superposition! When you apply a function to a superposition, HVM4
+// automatically evaluates BOTH branches IN PARALLEL.
+//
+// Syntax: &L{a, b} where L is a label (number) for tracking
+// Result: Both a and b are computed, potentially on different CPU cores
+
+// Basic superposition: two numbers at once
+// &0{#1, #2} represents both 1 AND 2 simultaneously
+&0{#1, #2}
+
+// ============================================================================
+// Automatic Parallelism
+// ============================================================================
+
+// When you apply a function to a superposition:
+// (f &{a, b}) => &{(f a), (f b)}
+//
+// Both (f a) and (f b) run IN PARALLEL!
+
+// Example: Double both branches
+// ((\x.(* x #2)) &0{#3, #7})
+// => &0{(* #3 #2), (* #7 #2)}
+// => &0{#6, #14}
+// ((\x.(* x #2)) &0{#3, #7})
+
+// ============================================================================
+// Parallel Search
+// ============================================================================
+
+// Superposition enables parallel search without explicit threading!
+// &{left, right} explores both paths simultaneously
+
+// Example: Which is bigger, 10*10 or 9*11?
+// &0{(* #10 #10), (* #9 #11)}
+// => &0{#100, #99}
+// &0{(* #10 #10), (* #9 #11)}
+
+// ============================================================================
+// Nested Superposition - Exponential Parallelism
+// ============================================================================
+
+// Nested superpositions create 2^n parallel branches!
+// &0{&1{a,b}, &1{c,d}} = 4 parallel computations
+
+// &0{&1{#1,#2}, &1{#3,#4}}
+// All four values computed in parallel
+
+// ============================================================================
+// Why This Matters
+// ============================================================================
+// In traditional programming, parallelism requires:
+// - Thread management
+// - Synchronization primitives
+// - Careful coordination
+//
+// In HVM4, parallelism is AUTOMATIC:
+// - Just use superposition
+// - The runtime handles everything
+// - Up to 310x speedup on parallel workloads!
