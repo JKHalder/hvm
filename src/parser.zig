@@ -1,0 +1,874 @@
+const std = @import("std");
+const hvm = @import("hvm.zig");
+const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
+const StringHashMap = std.StringHashMap;
+
+// =============================================================================
+// Parser Error
+// =============================================================================
+
+pub const ParseError = error{
+    UnexpectedChar,
+    UnexpectedEof,
+    ExpectedChar,
+    InvalidNumber,
+    InvalidOperator,
+    UndefinedVariable,
+    UndefinedFunction,
+    OutOfMemory,
+};
+
+// =============================================================================
+// Function Definition
+// =============================================================================
+
+pub const Func = struct {
+    name: []const u8,
+    params: [][]const u8,
+    body_text: []const u8, // Store text for lazy compilation
+    fid: u16,
+};
+
+// =============================================================================
+// Book (Function Registry)
+// =============================================================================
+
+pub const Book = struct {
+    funcs: StringHashMap(Func),
+    next_fid: u16,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) Book {
+        return .{
+            .funcs = StringHashMap(Func).init(allocator),
+            .next_fid = 0x10, // Reserve 0x00-0x0F for builtins
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Book) void {
+        self.funcs.deinit();
+    }
+
+    pub fn define(self: *Book, name: []const u8, params: [][]const u8, body_text: []const u8) !u16 {
+        const fid = self.next_fid;
+        self.next_fid += 1;
+        try self.funcs.put(name, .{
+            .name = name,
+            .params = params,
+            .body_text = body_text,
+            .fid = fid,
+        });
+        return fid;
+    }
+
+    pub fn get(self: *Book, name: []const u8) ?Func {
+        return self.funcs.get(name);
+    }
+};
+
+// =============================================================================
+// Parser
+// =============================================================================
+
+pub const Parser = struct {
+    text: []const u8,
+    pos: usize,
+    allocator: Allocator,
+    book: *Book,
+    vars: StringHashMap(u64), // Variable name -> heap location
+    var_counter: u64,
+
+    pub fn init(text: []const u8, allocator: Allocator, book: *Book) Parser {
+        return .{
+            .text = text,
+            .pos = 0,
+            .allocator = allocator,
+            .book = book,
+            .vars = StringHashMap(u64).init(allocator),
+            .var_counter = 0,
+        };
+    }
+
+    pub fn deinit(self: *Parser) void {
+        self.vars.deinit();
+    }
+
+    // Skip whitespace and comments
+    fn skip(self: *Parser) void {
+        while (self.pos < self.text.len) {
+            const c = self.text[self.pos];
+            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+                self.pos += 1;
+            } else if (c == '/' and self.pos + 1 < self.text.len and self.text[self.pos + 1] == '/') {
+                // Line comment
+                while (self.pos < self.text.len and self.text[self.pos] != '\n') {
+                    self.pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek(self: *Parser) ?u8 {
+        self.skip();
+        return if (self.pos < self.text.len) self.text[self.pos] else null;
+    }
+
+    fn advance(self: *Parser) ?u8 {
+        if (self.pos < self.text.len) {
+            const c = self.text[self.pos];
+            self.pos += 1;
+            return c;
+        }
+        return null;
+    }
+
+    fn consume(self: *Parser, expected: u8) ParseError!void {
+        self.skip();
+        if (self.pos >= self.text.len) return ParseError.UnexpectedEof;
+        if (self.text[self.pos] != expected) return ParseError.ExpectedChar;
+        self.pos += 1;
+    }
+
+    fn consumeStr(self: *Parser, expected: []const u8) ParseError!void {
+        self.skip();
+        if (self.pos + expected.len > self.text.len) return ParseError.UnexpectedEof;
+        if (!std.mem.eql(u8, self.text[self.pos .. self.pos + expected.len], expected)) {
+            return ParseError.ExpectedChar;
+        }
+        self.pos += expected.len;
+    }
+
+    fn isNameChar(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or c == '_' or c == '$';
+    }
+
+    fn isNameStart(c: u8) bool {
+        return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+    }
+
+    fn name(self: *Parser) ParseError![]const u8 {
+        self.skip();
+        const start = self.pos;
+        if (self.pos >= self.text.len or !isNameStart(self.text[self.pos])) {
+            return ParseError.UnexpectedChar;
+        }
+        while (self.pos < self.text.len and isNameChar(self.text[self.pos])) {
+            self.pos += 1;
+        }
+        return self.text[start..self.pos];
+    }
+
+    fn integer(self: *Parser) ParseError!u32 {
+        self.skip();
+        var negative = false;
+        if (self.pos < self.text.len and self.text[self.pos] == '-') {
+            negative = true;
+            self.pos += 1;
+        }
+        if (self.pos >= self.text.len or self.text[self.pos] < '0' or self.text[self.pos] > '9') {
+            return ParseError.InvalidNumber;
+        }
+        var val: u32 = 0;
+        while (self.pos < self.text.len and self.text[self.pos] >= '0' and self.text[self.pos] <= '9') {
+            val = val * 10 + (self.text[self.pos] - '0');
+            self.pos += 1;
+        }
+        if (negative) {
+            return @bitCast(-@as(i32, @intCast(val)));
+        }
+        return val;
+    }
+
+    fn parseOp(self: *Parser) ?hvm.Lab {
+        self.skip();
+        if (self.pos >= self.text.len) return null;
+
+        // Check for two-char operators first
+        if (self.pos + 1 < self.text.len) {
+            const two = self.text[self.pos .. self.pos + 2];
+            if (std.mem.eql(u8, two, "==")) {
+                self.pos += 2;
+                return hvm.OP_EQ;
+            }
+            if (std.mem.eql(u8, two, "!=")) {
+                self.pos += 2;
+                return hvm.OP_NE;
+            }
+            if (std.mem.eql(u8, two, "<=")) {
+                self.pos += 2;
+                return hvm.OP_LTE;
+            }
+            if (std.mem.eql(u8, two, ">=")) {
+                self.pos += 2;
+                return hvm.OP_GTE;
+            }
+            if (std.mem.eql(u8, two, "<<")) {
+                self.pos += 2;
+                return hvm.OP_LSH;
+            }
+            if (std.mem.eql(u8, two, ">>")) {
+                self.pos += 2;
+                return hvm.OP_RSH;
+            }
+        }
+
+        const c = self.text[self.pos];
+        self.pos += 1;
+        return switch (c) {
+            '+' => hvm.OP_ADD,
+            '-' => hvm.OP_SUB,
+            '*' => hvm.OP_MUL,
+            '/' => hvm.OP_DIV,
+            '%' => hvm.OP_MOD,
+            '=' => hvm.OP_EQ,
+            '!' => hvm.OP_NE,
+            '<' => hvm.OP_LT,
+            '>' => hvm.OP_GT,
+            '&' => hvm.OP_AND,
+            '|' => hvm.OP_OR,
+            '^' => hvm.OP_XOR,
+            else => {
+                self.pos -= 1;
+                return null;
+            },
+        };
+    }
+
+    // Bind a variable name to a heap location
+    fn bindVar(self: *Parser, var_name: []const u8, loc: u64) !void {
+        try self.vars.put(var_name, loc);
+    }
+
+    // Look up a variable
+    fn lookupVar(self: *Parser, var_name: []const u8) ?u64 {
+        return self.vars.get(var_name);
+    }
+
+    // Parse a term and allocate it on the heap
+    pub fn term(self: *Parser) ParseError!hvm.Term {
+        const c = self.peek() orelse return ParseError.UnexpectedEof;
+
+        // Erasure: *
+        if (c == '*') {
+            self.pos += 1;
+            return hvm.term_new(hvm.ERA, 0, 0);
+        }
+
+        // Number or Constructor: #123 or #Name{...}
+        if (c == '#') {
+            self.pos += 1;
+            const next = self.peek() orelse return ParseError.UnexpectedEof;
+
+            // Constructor: #Name{fields}
+            if (isNameStart(next)) {
+                const ctr_name = try self.name();
+                _ = ctr_name; // TODO: look up constructor ID
+
+                var fields: ArrayList(hvm.Term) = .empty;
+                defer fields.deinit(self.allocator);
+
+                if (self.peek() == @as(u8, '{')) {
+                    try self.consume('{');
+                    while (self.peek()) |fc| {
+                        if (fc == '}') break;
+                        try fields.append(self.allocator, try self.term());
+                    }
+                    try self.consume('}');
+                }
+
+                // Allocate constructor on heap
+                const loc = hvm.alloc_node(fields.items.len);
+                for (fields.items, 0..) |field, i| {
+                    hvm.set(loc + i, field);
+                }
+                return hvm.term_new(hvm.CTR, 0, loc); // TODO: proper constructor label
+            }
+
+            // Number: #123
+            const val = try self.integer();
+            return hvm.term_new(hvm.W32, 0, val);
+        }
+
+        // Character: 'c'
+        if (c == '\'') {
+            self.pos += 1;
+            const chr = self.advance() orelse return ParseError.UnexpectedEof;
+            try self.consume('\'');
+            return hvm.term_new(hvm.CHR, 0, chr);
+        }
+
+        // Lambda: λx.body or \x.body
+        if (c == '\\' or c == 0xCE) { // 0xCE is first byte of λ in UTF-8
+            if (c == 0xCE) {
+                self.pos += 2; // Skip λ (2 bytes in UTF-8)
+            } else {
+                self.pos += 1;
+            }
+
+            const var_name = try self.name();
+            try self.consume('.');
+
+            // Allocate lambda node
+            const lam_loc = hvm.alloc_node(1);
+
+            // Bind variable to lambda location (for VAR to point back)
+            try self.bindVar(var_name, lam_loc);
+
+            // Parse body
+            const body = try self.term();
+
+            // Set lambda body
+            hvm.set(lam_loc, body);
+
+            return hvm.term_new(hvm.LAM, 0, lam_loc);
+        }
+
+        // Function reference: @name(args...)
+        if (c == '@') {
+            self.pos += 1;
+            const ref_name = try self.name();
+
+            // Check for builtin functions
+            if (std.mem.eql(u8, ref_name, "SUP")) {
+                return self.parseBuiltinSUP();
+            }
+            if (std.mem.eql(u8, ref_name, "DUP")) {
+                return self.parseBuiltinDUP();
+            }
+
+            var args: ArrayList(hvm.Term) = .empty;
+            defer args.deinit(self.allocator);
+
+            if (self.peek() == @as(u8, '(')) {
+                try self.consume('(');
+                while (self.peek()) |ac| {
+                    if (ac == ')') break;
+                    try args.append(self.allocator, try self.term());
+                }
+                try self.consume(')');
+            }
+
+            // Look up function
+            if (self.book.get(ref_name)) |func| {
+                // Allocate arguments on heap
+                const loc = hvm.alloc_node(args.items.len);
+                for (args.items, 0..) |arg, i| {
+                    hvm.set(loc + i, arg);
+                }
+                hvm.hvm_get_state().fari[func.fid] = @intCast(args.items.len);
+                return hvm.term_new(hvm.REF, func.fid, loc);
+            } else {
+                return ParseError.UndefinedFunction;
+            }
+        }
+
+        // Pattern match: ~x { cases... }
+        if (c == '~') {
+            self.pos += 1;
+            const val = try self.term();
+            try self.consume('{');
+
+            var cases: ArrayList(hvm.Term) = .empty;
+            defer cases.deinit(self.allocator);
+
+            while (self.peek()) |cc| {
+                if (cc == '}') break;
+                try self.consume('#');
+                const case_name = try self.name();
+                _ = case_name;
+
+                // Parse case variables
+                var case_vars: ArrayList([]const u8) = .empty;
+                defer case_vars.deinit(self.allocator);
+
+                if (self.peek() == @as(u8, '{')) {
+                    try self.consume('{');
+                    while (self.peek()) |vc| {
+                        if (vc == '}') break;
+                        try case_vars.append(self.allocator, try self.name());
+                    }
+                    try self.consume('}');
+                }
+
+                try self.consume(':');
+
+                // Bind case variables
+                for (case_vars.items) |cv| {
+                    const cv_loc = hvm.alloc_node(1);
+                    try self.bindVar(cv, cv_loc);
+                }
+
+                const case_body = try self.term();
+                try cases.append(self.allocator, case_body);
+            }
+            try self.consume('}');
+
+            // Allocate MAT node: [scrutinee, case0, case1, ...]
+            const loc = hvm.alloc_node(1 + cases.items.len);
+            hvm.set(loc, val);
+            for (cases.items, 0..) |case_term, i| {
+                hvm.set(loc + 1 + i, case_term);
+            }
+
+            return hvm.term_new(hvm.MAT, @intCast(cases.items.len), loc);
+        }
+
+        // Parentheses: operator, switch, or application
+        if (c == '(') {
+            try self.consume('(');
+            const c2 = self.peek() orelse return ParseError.UnexpectedEof;
+
+            // Switch: (?n zero succ)
+            if (c2 == '?') {
+                self.pos += 1;
+                const n = try self.term();
+                const zero = try self.term();
+                const succ = try self.term();
+                try self.consume(')');
+
+                // Allocate SWI node: [scrutinee, zero_case, succ_case]
+                const loc = hvm.alloc_node(3);
+                hvm.set(loc, n);
+                hvm.set(loc + 1, zero);
+                hvm.set(loc + 2, succ);
+
+                return hvm.term_new(hvm.SWI, 2, loc);
+            }
+
+            // Check for binary operator
+            if (self.parseOp()) |op| {
+                const a = try self.term();
+                const b = try self.term();
+                try self.consume(')');
+
+                // Allocate OPX node
+                const loc = hvm.alloc_node(2);
+                hvm.set(loc, a);
+                hvm.set(loc + 1, b);
+
+                return hvm.term_new(hvm.OPX, op, loc);
+            }
+
+            // Application: (f x y z)
+            var fun = try self.term();
+            while (self.peek()) |pc| {
+                if (pc == ')') break;
+                const arg = try self.term();
+
+                // Allocate APP node
+                const loc = hvm.alloc_node(2);
+                hvm.set(loc, fun);
+                hvm.set(loc + 1, arg);
+                fun = hvm.term_new(hvm.APP, 0, loc);
+            }
+            try self.consume(')');
+            return fun;
+        }
+
+        // Superposition: &L{a, b}
+        if (c == '&') {
+            self.pos += 1;
+            const lab: u16 = if (self.peek()) |pc|
+                (if (pc >= '0' and pc <= '9') @truncate(try self.integer()) else 0)
+            else
+                0;
+            try self.consume('{');
+            const a = try self.term();
+            try self.consume(',');
+            const b = try self.term();
+            try self.consume('}');
+
+            // Allocate SUP node
+            const loc = hvm.alloc_node(2);
+            hvm.set(loc, a);
+            hvm.set(loc + 1, b);
+
+            return hvm.term_new(hvm.SUP, lab, loc);
+        }
+
+        // Duplication: !&L{x,y}=val;body
+        if (c == '!') {
+            self.pos += 1;
+            try self.consume('&');
+            const lab: u16 = if (self.peek()) |pc|
+                (if (pc >= '0' and pc <= '9') @truncate(try self.integer()) else 0)
+            else
+                0;
+            try self.consume('{');
+            const x = try self.name();
+            try self.consume(',');
+            const y = try self.name();
+            try self.consume('}');
+            try self.consume('=');
+            const val = try self.term();
+            try self.consume(';');
+
+            // Allocate DUP node - stores the value to be duplicated
+            const dup_loc = hvm.alloc_node(1);
+            hvm.set(dup_loc, val);
+
+            // Bind x to DP0, y to DP1
+            try self.bindVar(x, dup_loc);
+            try self.bindVar(y, dup_loc);
+
+            // Store which projection each variable uses
+            // We'll handle this by creating the DP0/DP1 terms when variables are used
+
+            // Parse body with bindings
+            const body = try self.termWithDupBindings(x, y, lab, dup_loc);
+
+            return body;
+        }
+
+        // Variable
+        if (isNameStart(c)) {
+            const var_name = try self.name();
+            if (self.lookupVar(var_name)) |loc| {
+                return hvm.term_new(hvm.VAR, 0, loc);
+            }
+            return ParseError.UndefinedVariable;
+        }
+
+        return ParseError.UnexpectedChar;
+    }
+
+    // Parse term with dup bindings - replaces x with DP0 and y with DP1
+    fn termWithDupBindings(self: *Parser, x: []const u8, y: []const u8, lab: u16, dup_loc: u64) ParseError!hvm.Term {
+        const c = self.peek() orelse return ParseError.UnexpectedEof;
+
+        // Check if it's a variable that matches x or y
+        if (isNameStart(c)) {
+            const save_pos = self.pos;
+            const var_name = try self.name();
+
+            if (std.mem.eql(u8, var_name, x)) {
+                return hvm.term_new(hvm.DP0, lab, dup_loc);
+            }
+            if (std.mem.eql(u8, var_name, y)) {
+                return hvm.term_new(hvm.DP1, lab, dup_loc);
+            }
+
+            // Not x or y, restore and parse normally
+            self.pos = save_pos;
+        }
+
+        // Parse normally
+        return self.term();
+    }
+
+    fn parseBuiltinSUP(self: *Parser) ParseError!hvm.Term {
+        try self.consume('(');
+        const lab = try self.term();
+        const tm0 = try self.term();
+        const tm1 = try self.term();
+        try self.consume(')');
+
+        const loc = hvm.alloc_node(3);
+        hvm.set(loc, lab);
+        hvm.set(loc + 1, tm0);
+        hvm.set(loc + 2, tm1);
+
+        return hvm.term_new(hvm.REF, hvm.SUP_F, loc);
+    }
+
+    fn parseBuiltinDUP(self: *Parser) ParseError!hvm.Term {
+        try self.consume('(');
+        const lab = try self.term();
+        const val = try self.term();
+        const bod = try self.term();
+        try self.consume(')');
+
+        const loc = hvm.alloc_node(3);
+        hvm.set(loc, lab);
+        hvm.set(loc + 1, val);
+        hvm.set(loc + 2, bod);
+
+        return hvm.term_new(hvm.REF, hvm.DUP_F, loc);
+    }
+
+    // Parse a function definition: @name(params) = body
+    pub fn definition(self: *Parser) ParseError!?struct { name: []const u8, params: [][]const u8, body_start: usize, body_end: usize } {
+        if (self.peek() != @as(u8, '@')) return null;
+
+        // Look ahead to check if this is a definition
+        const save = self.pos;
+        self.pos += 1; // skip @
+
+        // Get the name
+        const func_name = self.name() catch {
+            self.pos = save;
+            return null;
+        };
+
+        // Skip params if present
+        var params: ArrayList([]const u8) = .empty;
+        if (self.peek() == @as(u8, '(')) {
+            try self.consume('(');
+            while (self.peek()) |c| {
+                if (c == ')') break;
+                try params.append(self.allocator, self.name() catch {
+                    self.pos = save;
+                    params.deinit(self.allocator);
+                    return null;
+                });
+            }
+            self.consume(')') catch {
+                self.pos = save;
+                params.deinit(self.allocator);
+                return null;
+            };
+        }
+
+        self.skip();
+
+        // Check for '='
+        if (self.peek() != @as(u8, '=')) {
+            self.pos = save;
+            params.deinit(self.allocator);
+            return null;
+        }
+        self.pos += 1; // skip '='
+
+        const body_start = self.pos;
+
+        // Find end of body (next definition or EOF)
+        var depth: u32 = 0;
+        while (self.pos < self.text.len) {
+            const ch = self.text[self.pos];
+            if (ch == '(' or ch == '{') depth += 1;
+            if (ch == ')' or ch == '}') depth -= 1;
+            if (depth == 0 and ch == '@' and self.pos > body_start) {
+                // Check if this is a new definition (has = after name)
+                const check_pos = self.pos + 1;
+                var is_def = false;
+                var check = check_pos;
+                // Skip name
+                while (check < self.text.len and isNameChar(self.text[check])) check += 1;
+                // Skip whitespace
+                while (check < self.text.len and (self.text[check] == ' ' or self.text[check] == '\t' or self.text[check] == '\n')) check += 1;
+                // Skip params
+                if (check < self.text.len and self.text[check] == '(') {
+                    var d: u32 = 1;
+                    check += 1;
+                    while (check < self.text.len and d > 0) {
+                        if (self.text[check] == '(') d += 1;
+                        if (self.text[check] == ')') d -= 1;
+                        check += 1;
+                    }
+                }
+                // Skip whitespace
+                while (check < self.text.len and (self.text[check] == ' ' or self.text[check] == '\t' or self.text[check] == '\n')) check += 1;
+                if (check < self.text.len and self.text[check] == '=') is_def = true;
+
+                if (is_def) break;
+            }
+            self.pos += 1;
+        }
+
+        const body_end = self.pos;
+
+        return .{
+            .name = func_name,
+            .params = params.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
+            .body_start = body_start,
+            .body_end = body_end,
+        };
+    }
+
+    // Parse entire program
+    pub fn program(self: *Parser) ParseError!?hvm.Term {
+        // First pass: collect all definitions
+        while (true) {
+            if (try self.definition()) |def| {
+                const body_text = self.text[def.body_start..def.body_end];
+                _ = try self.book.define(def.name, def.params, body_text);
+            } else {
+                break;
+            }
+        }
+
+        // Compile all functions
+        var it = self.book.funcs.iterator();
+        while (it.next()) |entry| {
+            const func = entry.value_ptr.*;
+            try self.compileFunction(func);
+        }
+
+        // Parse main expression if any remains
+        if (self.peek() != null) {
+            return try self.term();
+        }
+        return null;
+    }
+
+    fn compileFunction(self: *Parser, func: Func) !void {
+        // Create a sub-parser for the function body
+        var body_parser = Parser.init(func.body_text, self.allocator, self.book);
+        defer body_parser.deinit();
+
+        // Bind parameters
+        for (func.params, 0..) |param, i| {
+            const loc = hvm.alloc_node(1);
+            try body_parser.bindVar(param, loc);
+            _ = i;
+        }
+
+        // Parse body
+        const body = try body_parser.term();
+
+        // Register function in HVM
+        // We need to create a function that, when called, expands to the body
+        // For now, we'll store the compiled body location
+        const state = hvm.hvm_get_state();
+        state.book[func.fid] = createFuncWrapper(func.fid, body);
+    }
+
+    fn createFuncWrapper(fid: u16, body: hvm.Term) hvm.BookFn {
+        // Store the body in a global lookup
+        func_bodies[fid] = body;
+        return funcDispatch;
+    }
+};
+
+// Global storage for function bodies (workaround for Zig's function pointer limitations)
+var func_bodies: [65536]hvm.Term = [_]hvm.Term{0} ** 65536;
+
+fn funcDispatch(ref: hvm.Term) hvm.Term {
+    const fid = hvm.term_lab(ref);
+    const body = func_bodies[fid];
+
+    // For now, just return the body
+    // A full implementation would substitute arguments
+    return body;
+}
+
+// =============================================================================
+// Public API
+// =============================================================================
+
+pub fn parse(allocator: Allocator, text: []const u8) !hvm.Term {
+    var book = Book.init(allocator);
+    defer book.deinit();
+
+    var parser = Parser.init(text, allocator, &book);
+    defer parser.deinit();
+
+    return parser.term();
+}
+
+pub fn parseProgram(allocator: Allocator, text: []const u8) !?hvm.Term {
+    var book = Book.init(allocator);
+    // Don't deinit book - it's needed for function lookups
+
+    var parser = Parser.init(text, allocator, &book);
+    defer parser.deinit();
+
+    return parser.program();
+}
+
+pub fn parseAndRun(allocator: Allocator, text: []const u8) !hvm.Term {
+    var book = Book.init(allocator);
+
+    var parser = Parser.init(text, allocator, &book);
+    defer parser.deinit();
+
+    if (try parser.program()) |main_term| {
+        return hvm.reduce(main_term);
+    }
+    return hvm.term_new(hvm.ERA, 0, 0);
+}
+
+// =============================================================================
+// Pretty Printer
+// =============================================================================
+
+pub fn pretty(allocator: Allocator, term: hvm.Term) ![]const u8 {
+    var buf: ArrayList(u8) = .empty;
+    try prettyInto(allocator, &buf, term);
+    return buf.toOwnedSlice(allocator);
+}
+
+fn prettyInto(allocator: Allocator, buf: *ArrayList(u8), term: hvm.Term) !void {
+    const tag = hvm.term_tag(term);
+    const lab = hvm.term_lab(term);
+    const loc = hvm.term_loc(term);
+
+    switch (tag) {
+        hvm.ERA => try buf.appendSlice(allocator, "*"),
+        hvm.W32 => try std.fmt.format(buf.writer(allocator), "#{d}", .{loc}),
+        hvm.CHR => try std.fmt.format(buf.writer(allocator), "'{c}'", .{@as(u8, @truncate(loc))}),
+        hvm.LAM => {
+            try buf.appendSlice(allocator, "\\_."); // Use ASCII backslash instead of λ
+            try prettyInto(allocator, buf, hvm.got(loc));
+        },
+        hvm.APP => {
+            try buf.append(allocator, '(');
+            try prettyInto(allocator, buf, hvm.got(loc));
+            try buf.append(allocator, ' ');
+            try prettyInto(allocator, buf, hvm.got(loc + 1));
+            try buf.append(allocator, ')');
+        },
+        hvm.SUP => {
+            try std.fmt.format(buf.writer(allocator), "&{d}{{", .{lab});
+            try prettyInto(allocator, buf, hvm.got(loc));
+            try buf.append(allocator, ',');
+            try prettyInto(allocator, buf, hvm.got(loc + 1));
+            try buf.append(allocator, '}');
+        },
+        hvm.DP0 => try std.fmt.format(buf.writer(allocator), "DP0({d},{d})", .{ lab, loc }),
+        hvm.DP1 => try std.fmt.format(buf.writer(allocator), "DP1({d},{d})", .{ lab, loc }),
+        hvm.VAR => try std.fmt.format(buf.writer(allocator), "VAR({d})", .{loc}),
+        hvm.REF => try std.fmt.format(buf.writer(allocator), "@{d}", .{lab}),
+        hvm.OPX, hvm.OPY => {
+            const op_str: []const u8 = switch (lab) {
+                hvm.OP_ADD => "+",
+                hvm.OP_SUB => "-",
+                hvm.OP_MUL => "*",
+                hvm.OP_DIV => "/",
+                hvm.OP_MOD => "%",
+                hvm.OP_EQ => "==",
+                hvm.OP_NE => "!=",
+                hvm.OP_LT => "<",
+                hvm.OP_GT => ">",
+                hvm.OP_LTE => "<=",
+                hvm.OP_GTE => ">=",
+                hvm.OP_AND => "&",
+                hvm.OP_OR => "|",
+                hvm.OP_XOR => "^",
+                hvm.OP_LSH => "<<",
+                hvm.OP_RSH => ">>",
+                else => "?",
+            };
+            try buf.append(allocator, '(');
+            try buf.appendSlice(allocator, op_str);
+            try buf.append(allocator, ' ');
+            try prettyInto(allocator, buf, hvm.got(loc));
+            try buf.append(allocator, ' ');
+            try prettyInto(allocator, buf, hvm.got(loc + 1));
+            try buf.append(allocator, ')');
+        },
+        hvm.SWI => {
+            try buf.appendSlice(allocator, "(?");
+            try prettyInto(allocator, buf, hvm.got(loc));
+            try buf.append(allocator, ' ');
+            try prettyInto(allocator, buf, hvm.got(loc + 1));
+            try buf.append(allocator, ' ');
+            try prettyInto(allocator, buf, hvm.got(loc + 2));
+            try buf.append(allocator, ')');
+        },
+        hvm.CTR => {
+            try std.fmt.format(buf.writer(allocator), "#CTR{d}{{", .{lab});
+            // TODO: print fields based on arity
+            try buf.appendSlice(allocator, "...}");
+        },
+        hvm.MAT => {
+            try buf.appendSlice(allocator, "~...");
+        },
+        else => try std.fmt.format(buf.writer(allocator), "?{d}({d},{d})", .{ tag, lab, loc }),
+    }
+}
