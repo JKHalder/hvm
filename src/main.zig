@@ -1244,13 +1244,50 @@ fn run_benchmark() void {
     print("  SIMD interactions: {d:.0} ops/sec\n", .{simd_int_ops_sec});
     print("  Pure computation: {d:.0} ops/sec\n", .{parallel_pure_ops_sec});
 
+    // =========================================================================
+    // NEW: SoA, Lock-Free, and Supercombinator Benchmarks
+    // =========================================================================
+
+    print("\n--- Advanced Optimization Benchmarks ---\n", .{});
+
+    // Benchmark 24: SoA tag scanning with SIMD
+    print("\n24. SoA SIMD tag scan (1M terms):\n", .{});
+    var soa_heap = hvm.SoAHeap.init(allocator, 1_000_000) catch {
+        print("  Failed to allocate SoA heap\n", .{});
+        return;
+    };
+    defer soa_heap.deinit(allocator);
+
+    // Fill with mixed tags
+    for (0..100_000) |j| {
+        soa_heap.set(soa_heap.alloc_slots(1), hvm.term_new(if (j % 10 == 0) hvm.LAM else hvm.NUM, 0, @truncate(j)));
+    }
+
+    var scan_results: [10000]usize = undefined;
+    timer.reset();
+    const found = soa_heap.scan_tag(hvm.LAM, &scan_results);
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Found {d} LAM terms in {d:.3} ms\n", .{ found, elapsed_ms });
+    print("  Scan rate: {d:.0} terms/sec\n", .{@as(f64, @floatFromInt(soa_heap.len)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 25: Supercombinator optimization
+    print("\n25. Supercombinator church_add (10M ops):\n", .{});
+    const sc_result = hvm.bench_supercombinators(10_000_000);
+    const sc_ops_sec = @as(f64, @floatFromInt(sc_result.ops)) / (@as(f64, @floatFromInt(sc_result.ns)) / 1_000_000_000.0);
+    print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(sc_result.ns)) / 1_000_000.0});
+    print("  Ops/sec: {d:.0}\n", .{sc_ops_sec});
+
     // Calculate speedups
     const serial_baseline = @as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0);
+    print("\n--- Performance Summary ---\n", .{});
+    print("Serial baseline: {d:.0} ops/sec\n", .{serial_baseline});
     print("\nSpeedups vs serial:\n", .{});
     print("  reduce_fast deep nested: {d:.1}x\n", .{fast_nested_ops / serial_baseline});
     print("  Parallel beta: {d:.1}x\n", .{parallel_beta_ops_sec / serial_baseline});
     print("  SIMD interactions: {d:.1}x\n", .{simd_int_ops_sec / serial_baseline});
     print("  Pure parallel: {d:.1}x\n", .{parallel_pure_ops_sec / serial_baseline});
+    print("  Supercombinators: {d:.1}x\n", .{sc_ops_sec / serial_baseline});
 
     print("\n", .{});
     hvm.show_stats();

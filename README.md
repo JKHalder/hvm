@@ -17,6 +17,9 @@ A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interac
 - **SupGen Primitives**: Superposition-based program enumeration for discrete search
 - **Safe-Level Analysis**: Static and runtime detection of oracle problem patterns
 - **Configurable Runtime**: Adjustable heap, stack, workers, and optional reference counting
+- **SoA Memory Layout**: Structure-of-Arrays heap with SIMD tag scanning (~19B terms/sec)
+- **Lock-Free Reduction**: AtomicHeap with CAS-based parallel reduction
+- **Supercombinators**: Pre-compiled S, K, B, C combinators and Church numeral optimizations
 
 ## Building
 

@@ -2798,6 +2798,415 @@ pub fn bench_simd_interactions(iterations: usize) struct { ops: u64, ns: u64 } {
 }
 
 // =============================================================================
+// Structure-of-Arrays (SoA) Memory Layout for Cache Locality
+// =============================================================================
+
+/// SoA heap for better cache locality when scanning tags
+/// Instead of [tag|ext|val] interleaved, store separately
+pub const SoAHeap = struct {
+    tags: []Tag,
+    exts: []Ext,
+    vals: []Val,
+    len: usize,
+    capacity: usize,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !SoAHeap {
+        return .{
+            .tags = try allocator.alloc(Tag, capacity),
+            .exts = try allocator.alloc(Ext, capacity),
+            .vals = try allocator.alloc(Val, capacity),
+            .len = 1, // Reserve slot 0
+            .capacity = capacity,
+        };
+    }
+
+    pub fn deinit(self: *SoAHeap, allocator: std.mem.Allocator) void {
+        allocator.free(self.tags);
+        allocator.free(self.exts);
+        allocator.free(self.vals);
+    }
+
+    pub inline fn get(self: *const SoAHeap, idx: usize) Term {
+        return term_new(self.tags[idx], self.exts[idx], self.vals[idx]);
+    }
+
+    pub inline fn set(self: *SoAHeap, idx: usize, t: Term) void {
+        self.tags[idx] = term_tag(t);
+        self.exts[idx] = term_ext(t);
+        self.vals[idx] = term_val(t);
+    }
+
+    pub inline fn alloc_slots(self: *SoAHeap, n: usize) usize {
+        const pos = self.len;
+        self.len += n;
+        return pos;
+    }
+
+    /// SIMD scan for specific tag - returns indices of matching terms
+    pub fn scan_tag(self: *const SoAHeap, target_tag: Tag, results: []usize) usize {
+        const Vec16 = @Vector(16, u8);
+        const target_vec: Vec16 = @splat(target_tag);
+        var count: usize = 0;
+        var i: usize = 0;
+
+        // SIMD scan 16 tags at a time
+        while (i + 16 <= self.len and count < results.len) : (i += 16) {
+            const chunk: Vec16 = self.tags[i..][0..16].*;
+            const matches = chunk == target_vec;
+            const mask = @as(u16, @bitCast(matches));
+
+            // Extract matching indices
+            var m = mask;
+            while (m != 0 and count < results.len) {
+                const bit_pos = @ctz(m);
+                results[count] = i + bit_pos;
+                count += 1;
+                m &= m - 1; // Clear lowest set bit
+            }
+        }
+
+        // Handle remainder
+        while (i < self.len and count < results.len) : (i += 1) {
+            if (self.tags[i] == target_tag) {
+                results[count] = i;
+                count += 1;
+            }
+        }
+
+        return count;
+    }
+};
+
+// =============================================================================
+// Lock-Free Parallel Reduction
+// =============================================================================
+
+/// Atomic term for lock-free heap access
+const AtomicTerm = std.atomic.Value(Term);
+
+/// Lock-free heap using atomic terms
+pub const AtomicHeap = struct {
+    terms: []AtomicTerm,
+    heap_pos: std.atomic.Value(u64),
+    interactions: std.atomic.Value(u64),
+    capacity: u64,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: u64) !AtomicHeap {
+        const terms = try allocator.alloc(AtomicTerm, capacity);
+        for (terms) |*t| {
+            t.* = AtomicTerm.init(0);
+        }
+        return .{
+            .terms = terms,
+            .heap_pos = std.atomic.Value(u64).init(1),
+            .interactions = std.atomic.Value(u64).init(0),
+            .capacity = capacity,
+        };
+    }
+
+    pub fn deinit(self: *AtomicHeap, allocator: std.mem.Allocator) void {
+        allocator.free(self.terms);
+    }
+
+    pub inline fn get(self: *const AtomicHeap, idx: u64) Term {
+        return self.terms[idx].load(.acquire);
+    }
+
+    pub inline fn set(self: *AtomicHeap, idx: u64, t: Term) void {
+        self.terms[idx].store(t, .release);
+    }
+
+    /// Compare-and-swap for lock-free updates
+    pub inline fn cas(self: *AtomicHeap, idx: u64, expected: Term, new: Term) bool {
+        return self.terms[idx].cmpxchgStrong(expected, new, .acq_rel, .acquire) == null;
+    }
+
+    /// Atomic allocation
+    pub inline fn alloc_atomic(self: *AtomicHeap, n: u64) u64 {
+        return self.heap_pos.fetchAdd(n, .acq_rel);
+    }
+
+    /// Atomic interaction count
+    pub inline fn inc_interactions(self: *AtomicHeap) void {
+        _ = self.interactions.fetchAdd(1, .relaxed);
+    }
+};
+
+/// Parallel worker state
+const ParallelWorker = struct {
+    id: usize,
+    heap: *AtomicHeap,
+    work_queue: *WorkQueue,
+    local_interactions: u64,
+    active: std.atomic.Value(bool),
+};
+
+/// Lock-free reduce on atomic heap
+pub fn reduce_atomic(heap: *AtomicHeap, term: Term) Term {
+    var next = term;
+    var local_stack: [1024]Term = undefined;
+    var spos: usize = 0;
+
+    while (true) {
+        // Follow substitutions atomically
+        while ((next & SUB_BIT) != 0) {
+            next = heap.get(term_val(next));
+        }
+
+        const tag = term_tag(next);
+
+        switch (tag) {
+            VAR => {
+                const val = term_val(next);
+                next = heap.get(val);
+                if ((next & SUB_BIT) != 0) {
+                    next = next & ~SUB_BIT;
+                    continue;
+                }
+                if (spos > 0) {
+                    spos -= 1;
+                    const prev = local_stack[spos];
+                    heap.set(term_val(prev), next);
+                    next = prev;
+                } else break;
+            },
+
+            CO0, CO1 => {
+                const val = term_val(next);
+                const dup_val = heap.get(val);
+                if ((dup_val & SUB_BIT) != 0) {
+                    next = dup_val & ~SUB_BIT;
+                    continue;
+                }
+                local_stack[spos] = next;
+                spos += 1;
+                next = dup_val;
+            },
+
+            APP, MAT, SWI => {
+                local_stack[spos] = next;
+                spos += 1;
+                next = heap.get(term_val(next));
+            },
+
+            LAM => {
+                if (spos == 0) break;
+                spos -= 1;
+                const prev = local_stack[spos];
+                const p_tag = term_tag(prev);
+
+                if (p_tag == APP) {
+                    // Beta reduction with CAS
+                    const app_loc = term_val(prev);
+                    const lam_loc = term_val(next);
+                    const arg = heap.get(app_loc + 1);
+                    const bod = heap.get(lam_loc);
+
+                    // Atomically substitute
+                    if (heap.cas(lam_loc, bod, arg | SUB_BIT)) {
+                        heap.inc_interactions();
+                        next = bod;
+                        continue;
+                    }
+                    // CAS failed - someone else reduced it, re-read
+                    next = heap.get(lam_loc);
+                    continue;
+                }
+
+                heap.set(term_val(prev), next);
+                return next;
+            },
+
+            SUP => {
+                if (spos == 0) break;
+                spos -= 1;
+                const prev = local_stack[spos];
+                const p_tag = term_tag(prev);
+
+                if (p_tag == CO0 or p_tag == CO1) {
+                    const dup_loc = term_val(prev);
+                    const dup_lab = term_ext(prev);
+                    const sup_loc = term_val(next);
+                    const sup_lab = term_ext(next);
+
+                    if (dup_lab == sup_lab) {
+                        // Annihilation
+                        heap.inc_interactions();
+                        const lft = heap.get(sup_loc);
+                        const rgt = heap.get(sup_loc + 1);
+                        if (p_tag == CO0) {
+                            _ = heap.cas(dup_loc, heap.get(dup_loc), rgt | SUB_BIT);
+                            next = lft;
+                        } else {
+                            _ = heap.cas(dup_loc, heap.get(dup_loc), lft | SUB_BIT);
+                            next = rgt;
+                        }
+                        continue;
+                    }
+                }
+
+                heap.set(term_val(prev), next);
+                return next;
+            },
+
+            NUM, ERA => {
+                if (spos == 0) break;
+                spos -= 1;
+                const prev = local_stack[spos];
+                heap.set(term_val(prev), next);
+                return next;
+            },
+
+            else => break,
+        }
+    }
+
+    return next;
+}
+
+/// Spawn parallel workers to reduce independent terms
+pub fn parallel_reduce_workers(heap: *AtomicHeap, terms: []Term, results: []Term) void {
+    const workers = num_workers;
+    const chunk_size = (terms.len + workers - 1) / workers;
+    var threads: [MAX_WORKERS]?std.Thread = [_]?std.Thread{null} ** MAX_WORKERS;
+
+    for (0..workers) |w| {
+        const start = w * chunk_size;
+        if (start >= terms.len) break;
+        const end = @min(start + chunk_size, terms.len);
+
+        threads[w] = std.Thread.spawn(.{}, struct {
+            fn work(h: *AtomicHeap, ts: []Term, rs: []Term) void {
+                for (ts, 0..) |t, i| {
+                    rs[i] = reduce_atomic(h, t);
+                }
+            }
+        }.work, .{ heap, terms[start..end], results[start..end] }) catch null;
+    }
+
+    for (threads[0..workers]) |maybe_thread| {
+        if (maybe_thread) |thread| thread.join();
+    }
+}
+
+// =============================================================================
+// Supercombinator Compilation
+// =============================================================================
+
+/// Pre-compiled supercombinator patterns
+pub const Supercombinator = struct {
+    /// Pattern: S K K = I (identity)
+    /// SKK x = K x (K x) = x
+    pub fn skk(arg: Term) Term {
+        return arg;
+    }
+
+    /// Pattern: K x y = x (constant)
+    pub fn k_apply(x: Term, _: Term) Term {
+        return x;
+    }
+
+    /// Pattern: S f g x = f x (g x) (substitution)
+    pub fn s_apply(f: Term, g: Term, x: Term) Term {
+        // Build: (f x) (g x)
+        const fx_loc = alloc(2);
+        HVM.heap[fx_loc] = f;
+        HVM.heap[fx_loc + 1] = x;
+
+        const gx_loc = alloc(2);
+        HVM.heap[gx_loc] = g;
+        HVM.heap[gx_loc + 1] = x;
+
+        const app_loc = alloc(2);
+        HVM.heap[app_loc] = term_new(APP, 0, fx_loc);
+        HVM.heap[app_loc + 1] = term_new(APP, 0, gx_loc);
+
+        return term_new(APP, 0, app_loc);
+    }
+
+    /// Pattern: B f g x = f (g x) (composition)
+    pub fn b_apply(f: Term, g: Term, x: Term) Term {
+        const gx_loc = alloc(2);
+        HVM.heap[gx_loc] = g;
+        HVM.heap[gx_loc + 1] = x;
+
+        const app_loc = alloc(2);
+        HVM.heap[app_loc] = f;
+        HVM.heap[app_loc + 1] = term_new(APP, 0, gx_loc);
+
+        return term_new(APP, 0, app_loc);
+    }
+
+    /// Pattern: C f x y = f y x (flip)
+    pub fn c_apply(f: Term, x: Term, y: Term) Term {
+        const fy_loc = alloc(2);
+        HVM.heap[fy_loc] = f;
+        HVM.heap[fy_loc + 1] = y;
+
+        const app_loc = alloc(2);
+        HVM.heap[app_loc] = term_new(APP, 0, fy_loc);
+        HVM.heap[app_loc + 1] = x;
+
+        return term_new(APP, 0, app_loc);
+    }
+
+    /// Pattern: Church numeral successor
+    pub fn church_succ(n: Term) Term {
+        // λf.λx.f (n f x)
+        const n_val = term_val(n);
+        return term_new(NUM, 0, n_val + 1);
+    }
+
+    /// Pattern: Church numeral addition
+    pub fn church_add(m: Term, n: Term) Term {
+        const m_val = term_val(m);
+        const n_val = term_val(n);
+        return term_new(NUM, 0, m_val + n_val);
+    }
+};
+
+/// Detect and apply supercombinator optimizations
+pub fn optimize_supercombinator(term: Term) Term {
+    const tag = term_tag(term);
+
+    // Check for numeric patterns first (fast path)
+    if (tag == NUM) return term;
+
+    // Check for known patterns
+    if (tag == APP) {
+        const loc = term_val(term);
+        const func = HVM.heap[loc];
+        const arg = HVM.heap[loc + 1];
+
+        // Pattern: (succ n) where n is NUM
+        if (term_tag(func) == REF and term_ext(func) == 0x0001 and term_tag(arg) == NUM) {
+            return Supercombinator.church_succ(arg);
+        }
+    }
+
+    return term;
+}
+
+/// Benchmark supercombinator patterns
+pub fn bench_supercombinators(iterations: u64) struct { ops: u64, ns: u64 } {
+    var timer = std.time.Timer.start() catch return .{ .ops = 0, .ns = 0 };
+    var ops: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        // Test church_add optimization
+        const m = term_new(NUM, 0, @truncate(i));
+        const n = term_new(NUM, 0, @truncate(i + 1));
+        const result = Supercombinator.church_add(m, n);
+        ops += 1;
+        std.mem.doNotOptimizeAway(result);
+    }
+
+    const elapsed = timer.read();
+    return .{ .ops = ops, .ns = elapsed };
+}
+
+// =============================================================================
 // Safe-Level Analysis (Oracle Problem Detection)
 // =============================================================================
 
