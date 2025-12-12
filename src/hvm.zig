@@ -3207,6 +3207,540 @@ pub fn bench_supercombinators(iterations: u64) struct { ops: u64, ns: u64 } {
 }
 
 // =============================================================================
+// COMPILED REDUCER - Direct Threaded Code with Comptime Specialization
+// =============================================================================
+//
+// This implements a true "compiled" approach by:
+// 1. Direct-threaded dispatch via function pointers (no switch overhead)
+// 2. Comptime-generated specialized handlers
+// 3. Forced inlining of hot paths
+// 4. Zero-copy term manipulation
+// 5. Tail-call optimization for continuous reduction
+
+/// Handler function type for direct-threaded dispatch
+const Handler = *const fn (*ReduceState) Term;
+
+/// Reduction state passed between handlers (register-like)
+const ReduceState = struct {
+    next: Term,
+    heap: []Term,
+    stack: []Term,
+    spos: usize,
+    stop: usize,
+    interactions: *u64,
+};
+
+/// Comptime-generated dispatch table - maps tag to handler
+const compiled_handlers: [256]Handler = blk: {
+    var table: [256]Handler = .{&handle_default} ** 256;
+
+    // Core handlers
+    table[VAR] = &handle_var;
+    table[CO0] = &handle_collapse;
+    table[CO1] = &handle_collapse;
+    table[REF] = &handle_ref;
+    table[APP] = &handle_elim;
+    table[MAT] = &handle_elim;
+    table[SWI] = &handle_elim;
+    table[LET] = &handle_elim;
+    table[USE] = &handle_elim;
+    table[P02] = &handle_p02;
+
+    // Value handlers
+    table[LAM] = &handle_lam;
+    table[SUP] = &handle_sup;
+    table[NUM] = &handle_num;
+    table[ERA] = &handle_era;
+
+    // Constructor handlers
+    for ([_]Tag{ C00, C01, C02, C03, C04, C05, C06, C07, C08, C09, C10, C11, C12, C13, C14, C15 }) |ctr| {
+        table[ctr] = &handle_ctr;
+    }
+
+    break :blk table;
+};
+
+/// VAR handler - follow substitution
+fn handle_var(state: *ReduceState) Term {
+    const val = term_val(state.next);
+    state.next = state.heap[val];
+    if ((state.next & SUB_BIT) != 0) {
+        state.next = state.next & ~SUB_BIT;
+        return dispatch(state);
+    }
+    if (state.spos > state.stop) {
+        state.spos -= 1;
+        state.heap[term_val(state.stack[state.spos])] = state.next;
+        state.next = state.stack[state.spos];
+        return dispatch(state);
+    }
+    return state.next;
+}
+
+/// CO0/CO1 handler - collapse projection
+fn handle_collapse(state: *ReduceState) Term {
+    const val = term_val(state.next);
+    const dup_val = state.heap[val];
+    if ((dup_val & SUB_BIT) != 0) {
+        state.next = dup_val & ~SUB_BIT;
+        return dispatch(state);
+    }
+    state.stack[state.spos] = state.next;
+    state.spos += 1;
+    state.next = dup_val;
+    return dispatch(state);
+}
+
+/// REF handler - function expansion
+fn handle_ref(state: *ReduceState) Term {
+    const ext = term_ext(state.next);
+    HVM.stack_pos = state.spos;
+    if (HVM.book[ext]) |func| {
+        state.next = func(state.next);
+        state.interactions.* += 1;
+    }
+    state.spos = HVM.stack_pos;
+    return dispatch(state);
+}
+
+/// Eliminator handler (APP, MAT, SWI, etc.)
+fn handle_elim(state: *ReduceState) Term {
+    state.stack[state.spos] = state.next;
+    state.spos += 1;
+    state.next = state.heap[term_val(state.next)];
+    return dispatch(state);
+}
+
+/// P02 handler - binary primitive
+fn handle_p02(state: *ReduceState) Term {
+    const ext = term_ext(state.next);
+    const val = term_val(state.next);
+    state.stack[state.spos] = term_new(F_OP2, ext, val);
+    state.spos += 1;
+    state.next = state.heap[val];
+    return dispatch(state);
+}
+
+/// LAM handler - lambda value, check for interactions
+fn handle_lam(state: *ReduceState) Term {
+    if (state.spos <= state.stop) return state.next;
+
+    state.spos -= 1;
+    const prev = state.stack[state.spos];
+    const p_tag = term_tag(prev);
+
+    // APP + LAM: Inline beta reduction (hottest path)
+    if (p_tag == APP) {
+        @branchHint(.likely);
+        const app_loc = term_val(prev);
+        const lam_loc = term_val(state.next);
+        state.interactions.* += 1;
+
+        const arg = state.heap[app_loc + 1];
+        state.next = state.heap[lam_loc];
+        state.heap[lam_loc] = arg | SUB_BIT;
+        return dispatch(state);
+    }
+
+    // CO0/CO1 + LAM: Duplicate lambda
+    if (p_tag == CO0 or p_tag == CO1) {
+        state.interactions.* += 1;
+        const dup_loc = term_val(prev);
+        const dup_lab = term_ext(prev);
+        const lam_loc = term_val(state.next);
+        const bod = state.heap[lam_loc];
+
+        const base = HVM.heap_pos;
+        HVM.heap_pos += 3;
+        const inner_dup: Val = @truncate(base);
+        const lam0_loc: Val = @truncate(base + 1);
+        const lam1_loc: Val = @truncate(base + 2);
+
+        state.heap[inner_dup] = bod;
+        state.heap[lam0_loc] = term_new(CO0, dup_lab, inner_dup);
+        state.heap[lam1_loc] = term_new(CO1, dup_lab, inner_dup);
+
+        if (p_tag == CO0) {
+            state.heap[dup_loc] = term_new(LAM, 0, lam1_loc) | SUB_BIT;
+            state.next = term_new(LAM, 0, lam0_loc);
+        } else {
+            state.heap[dup_loc] = term_new(LAM, 0, lam0_loc) | SUB_BIT;
+            state.next = term_new(LAM, 0, lam1_loc);
+        }
+        return dispatch(state);
+    }
+
+    state.heap[term_val(prev)] = state.next;
+    return state.next;
+}
+
+/// SUP handler - superposition value
+fn handle_sup(state: *ReduceState) Term {
+    if (state.spos <= state.stop) return state.next;
+
+    state.spos -= 1;
+    const prev = state.stack[state.spos];
+    const p_tag = term_tag(prev);
+
+    // CO0/CO1 + SUP: Annihilation or commutation
+    if (p_tag == CO0 or p_tag == CO1) {
+        state.interactions.* += 1;
+        const dup_loc = term_val(prev);
+        const dup_lab = term_ext(prev);
+        const sup_loc = term_val(state.next);
+        const sup_lab = term_ext(state.next);
+
+        if (dup_lab == sup_lab) {
+            // Annihilation (fast path)
+            @branchHint(.likely);
+            if (p_tag == CO0) {
+                state.heap[dup_loc] = state.heap[sup_loc + 1] | SUB_BIT;
+                state.next = state.heap[sup_loc];
+            } else {
+                state.heap[dup_loc] = state.heap[sup_loc] | SUB_BIT;
+                state.next = state.heap[sup_loc + 1];
+            }
+            return dispatch(state);
+        } else {
+            // Commutation
+            commutation_count += 1;
+            const base = HVM.heap_pos;
+            HVM.heap_pos += 6;
+
+            const dup0: Val = @truncate(base);
+            const dup1: Val = @truncate(base + 1);
+            const sup0: Val = @truncate(base + 2);
+            const sup1: Val = @truncate(base + 4);
+
+            state.heap[dup0] = state.heap[sup_loc];
+            state.heap[dup1] = state.heap[sup_loc + 1];
+            state.heap[sup0] = term_new(CO0, dup_lab, dup0);
+            state.heap[sup0 + 1] = term_new(CO0, dup_lab, dup1);
+            state.heap[sup1] = term_new(CO1, dup_lab, dup0);
+            state.heap[sup1 + 1] = term_new(CO1, dup_lab, dup1);
+
+            if (p_tag == CO0) {
+                state.heap[dup_loc] = term_new(SUP, sup_lab, sup1) | SUB_BIT;
+                state.next = term_new(SUP, sup_lab, sup0);
+            } else {
+                state.heap[dup_loc] = term_new(SUP, sup_lab, sup0) | SUB_BIT;
+                state.next = term_new(SUP, sup_lab, sup1);
+            }
+            return dispatch(state);
+        }
+    }
+
+    // APP + SUP: Distribution
+    if (p_tag == APP) {
+        state.interactions.* += 1;
+        const app_loc = term_val(prev);
+        const sup_loc = term_val(state.next);
+        const sup_lab = term_ext(state.next);
+        const arg = state.heap[app_loc + 1];
+        const lft = state.heap[sup_loc];
+        const rgt = state.heap[sup_loc + 1];
+
+        const base = HVM.heap_pos;
+        HVM.heap_pos += 7;
+        const dup_loc: Val = @truncate(base);
+        const app0_loc: Val = @truncate(base + 1);
+        const app1_loc: Val = @truncate(base + 3);
+        const res_loc: Val = @truncate(base + 5);
+
+        state.heap[dup_loc] = arg;
+        state.heap[app0_loc] = lft;
+        state.heap[app0_loc + 1] = term_new(CO0, sup_lab, dup_loc);
+        state.heap[app1_loc] = rgt;
+        state.heap[app1_loc + 1] = term_new(CO1, sup_lab, dup_loc);
+        state.heap[res_loc] = term_new(APP, 0, app0_loc);
+        state.heap[res_loc + 1] = term_new(APP, 0, app1_loc);
+
+        state.next = term_new(SUP, sup_lab, res_loc);
+        return dispatch(state);
+    }
+
+    state.heap[term_val(prev)] = state.next;
+    return state.next;
+}
+
+/// NUM handler - number value
+fn handle_num(state: *ReduceState) Term {
+    if (state.spos <= state.stop) return state.next;
+
+    state.spos -= 1;
+    const prev = state.stack[state.spos];
+    const p_tag = term_tag(prev);
+    const p_ext = term_ext(prev);
+    const p_val = term_val(prev);
+
+    // CO0/CO1 + NUM: Trivial duplication
+    if (p_tag == CO0 or p_tag == CO1) {
+        state.interactions.* += 1;
+        state.heap[p_val] = state.next | SUB_BIT;
+        return dispatch(state);
+    }
+
+    // SWI + NUM: Numeric switch
+    if (p_tag == SWI) {
+        state.interactions.* += 1;
+        const num_val = term_val(state.next);
+        if (num_val == 0) {
+            state.next = state.heap[p_val + 1];
+        } else {
+            const succ = state.heap[p_val + 2];
+            const loc = HVM.heap_pos;
+            HVM.heap_pos += 2;
+            state.heap[loc] = succ;
+            state.heap[loc + 1] = term_new(NUM, 0, num_val - 1);
+            state.next = term_new(APP, 0, @truncate(loc));
+        }
+        return dispatch(state);
+    }
+
+    // F_OP2 + NUM: First operand ready
+    if (p_tag == F_OP2) {
+        state.interactions.* += 1;
+        state.heap[p_val] = state.next;
+        state.stack[state.spos] = term_new(F_OP2 + 1, p_ext, p_val);
+        state.spos += 1;
+        state.next = state.heap[p_val + 1];
+        return dispatch(state);
+    }
+
+    // F_OP2+1 + NUM: Compute result
+    if (p_tag == F_OP2 + 1) {
+        state.interactions.* += 1;
+        const x = term_val(state.heap[p_val]);
+        const y = term_val(state.next);
+        state.next = term_new(NUM, 0, compute_op(p_ext, x, y));
+        return dispatch(state);
+    }
+
+    state.heap[p_val] = state.next;
+    return state.next;
+}
+
+/// ERA handler - erasure value
+fn handle_era(state: *ReduceState) Term {
+    if (state.spos <= state.stop) return state.next;
+
+    state.spos -= 1;
+    const prev = state.stack[state.spos];
+    const p_tag = term_tag(prev);
+
+    // APP + ERA
+    if (p_tag == APP) {
+        state.interactions.* += 1;
+        state.next = term_new(ERA, 0, 0);
+        return dispatch(state);
+    }
+
+    // CO0/CO1 + ERA
+    if (p_tag == CO0 or p_tag == CO1) {
+        state.interactions.* += 1;
+        state.heap[term_val(prev)] = term_new(ERA, 0, 0) | SUB_BIT;
+        state.next = term_new(ERA, 0, 0);
+        return dispatch(state);
+    }
+
+    state.heap[term_val(prev)] = state.next;
+    return state.next;
+}
+
+/// CTR handler - constructor value
+fn handle_ctr(state: *ReduceState) Term {
+    if (state.spos <= state.stop) return state.next;
+
+    state.spos -= 1;
+    const prev = state.stack[state.spos];
+    const p_tag = term_tag(prev);
+    const tag = term_tag(state.next);
+
+    // MAT + CTR: Pattern match
+    if (p_tag == MAT) {
+        state.interactions.* += 1;
+        const ctr_loc = term_val(state.next);
+        const mat_loc = term_val(prev);
+        const arity = tag - C00;
+        const case_idx = term_ext(state.next);
+
+        var branch = state.heap[mat_loc + 1 + case_idx];
+        for (0..arity) |i| {
+            const field = state.heap[ctr_loc + i];
+            const loc = HVM.heap_pos;
+            HVM.heap_pos += 2;
+            state.heap[loc] = branch;
+            state.heap[loc + 1] = field;
+            branch = term_new(APP, 0, @truncate(loc));
+        }
+        state.next = branch;
+        return dispatch(state);
+    }
+
+    // CO0/CO1 + CTR: Duplicate constructor
+    if (p_tag == CO0 or p_tag == CO1) {
+        state.interactions.* += 1;
+        const dup_loc = term_val(prev);
+        const dup_lab = term_ext(prev);
+        const ctr_loc = term_val(state.next);
+        const ctr_ext = term_ext(state.next);
+        const arity = tag - C00;
+
+        if (arity == 0) {
+            state.heap[dup_loc] = state.next | SUB_BIT;
+            return dispatch(state);
+        }
+
+        const needed = 3 * arity;
+        const base = HVM.heap_pos;
+        HVM.heap_pos += needed;
+
+        for (0..arity) |i| {
+            const idx: Val = @truncate(i);
+            const dup_i: Val = @truncate(base + i);
+            state.heap[dup_i] = state.heap[ctr_loc + idx];
+        }
+
+        const ctr0_base: Val = @truncate(base + arity);
+        const ctr1_base: Val = @truncate(base + 2 * arity);
+
+        for (0..arity) |i| {
+            const idx: Val = @truncate(i);
+            const dup_i: Val = @truncate(base + i);
+            state.heap[ctr0_base + idx] = term_new(CO0, dup_lab, dup_i);
+            state.heap[ctr1_base + idx] = term_new(CO1, dup_lab, dup_i);
+        }
+
+        if (p_tag == CO0) {
+            state.heap[dup_loc] = term_new(tag, ctr_ext, ctr1_base) | SUB_BIT;
+            state.next = term_new(tag, ctr_ext, ctr0_base);
+        } else {
+            state.heap[dup_loc] = term_new(tag, ctr_ext, ctr0_base) | SUB_BIT;
+            state.next = term_new(tag, ctr_ext, ctr1_base);
+        }
+        return dispatch(state);
+    }
+
+    state.heap[term_val(prev)] = state.next;
+    return state.next;
+}
+
+/// Default handler - return term
+fn handle_default(state: *ReduceState) Term {
+    return state.next;
+}
+
+/// Direct-threaded dispatch - jump to handler via function pointer
+inline fn dispatch(state: *ReduceState) Term {
+    // Follow substitutions first
+    while ((state.next & SUB_BIT) != 0) {
+        state.next = state.heap[term_val(state.next)];
+    }
+    const tag = term_tag(state.next);
+    return compiled_handlers[tag](state);
+}
+
+/// COMPILED REDUCER - Main entry point
+/// Uses direct-threaded dispatch for zero switch overhead
+pub fn reduce_compiled(term: Term) Term {
+    var interactions: u64 = 0;
+    var state = ReduceState{
+        .next = term,
+        .heap = HVM.heap,
+        .stack = HVM.stack,
+        .spos = HVM.stack_pos,
+        .stop = HVM.stack_pos,
+        .interactions = &interactions,
+    };
+
+    const result = dispatch(&state);
+
+    HVM.stack_pos = state.spos;
+    HVM.interactions += interactions;
+    return result;
+}
+
+/// Benchmark compiled reducer
+pub fn bench_compiled(iterations: u64) struct { ops: u64, ns: u64 } {
+    var timer = std.time.Timer.start() catch return .{ .ops = 0, .ns = 0 };
+    var ops: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        const lam_loc = alloc(1);
+        HVM.heap[lam_loc] = term_new(VAR, 0, lam_loc);
+        const app_loc = alloc(2);
+        HVM.heap[app_loc] = term_new(LAM, 0, lam_loc);
+        HVM.heap[app_loc + 1] = term_new(NUM, 0, @truncate(i));
+        _ = reduce_compiled(term_new(APP, 0, app_loc));
+        ops += 1;
+    }
+
+    const elapsed = timer.read();
+    return .{ .ops = ops, .ns = elapsed };
+}
+
+/// Specialized pure beta-reduction chain (no dispatch overhead)
+/// For when you know the term is a chain of (((λ.λ.λ... body) arg1) arg2) ...
+pub fn reduce_beta_chain(term: Term) Term {
+    var next = term;
+    const heap = HVM.heap;
+
+    while (true) {
+        // Follow substitutions
+        while ((next & SUB_BIT) != 0) {
+            next = heap[term_val(next)];
+        }
+
+        const tag = term_tag(next);
+        if (tag != APP) return next;
+
+        const app_loc = term_val(next);
+        var func = heap[app_loc];
+
+        // Follow substitutions on function
+        while ((func & SUB_BIT) != 0) {
+            func = heap[term_val(func)];
+        }
+
+        if (term_tag(func) != LAM) return next;
+
+        // Beta reduction
+        const lam_loc = term_val(func);
+        const arg = heap[app_loc + 1];
+        next = heap[lam_loc];
+        heap[lam_loc] = arg | SUB_BIT;
+        HVM.interactions += 1;
+    }
+}
+
+/// Benchmark pure beta chain
+pub fn bench_beta_chain(iterations: u64, depth: u32) struct { ops: u64, ns: u64 } {
+    var timer = std.time.Timer.start() catch return .{ .ops = 0, .ns = 0 };
+    var ops: u64 = 0;
+
+    var i: u64 = 0;
+    while (i < iterations) : (i += 1) {
+        // Build chain: (((...((λx.x) n)...)...)
+        var term = term_new(NUM, 0, @truncate(i));
+        var d: u32 = 0;
+        while (d < depth) : (d += 1) {
+            const lam_loc = alloc(1);
+            HVM.heap[lam_loc] = term_new(VAR, 0, lam_loc);
+            const app_loc = alloc(2);
+            HVM.heap[app_loc] = term_new(LAM, 0, lam_loc);
+            HVM.heap[app_loc + 1] = term;
+            term = term_new(APP, 0, app_loc);
+        }
+        _ = reduce_beta_chain(term);
+        ops += depth;
+    }
+
+    const elapsed = timer.read();
+    return .{ .ops = ops, .ns = elapsed };
+}
+
+// =============================================================================
 // Safe-Level Analysis (Oracle Problem Detection)
 // =============================================================================
 

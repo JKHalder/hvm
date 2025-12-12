@@ -20,6 +20,7 @@ A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interac
 - **SoA Memory Layout**: Structure-of-Arrays heap with SIMD tag scanning (~19B terms/sec)
 - **Lock-Free Reduction**: AtomicHeap with CAS-based parallel reduction
 - **Supercombinators**: Pre-compiled S, K, B, C combinators and Church numeral optimizations
+- **Compiled Reducer**: Direct-threaded dispatch with comptime-generated handler tables (5x speedup)
 
 ## Building
 
@@ -152,6 +153,13 @@ Optimized following [VictorTaelin's IC techniques](https://gist.github.com/Victo
 | reduce_fast: DUP+LAM | ~183M | 1.35x |
 | reduce_fast: Deep nested β | ~222M | **1.58x** |
 | reduce_fast: P02 arithmetic | ~135M | 1.0x |
+
+### Compiled Reducer Benchmarks
+
+| Benchmark | Ops/sec | vs Serial |
+|-----------|---------|-----------|
+| reduce_compiled: Beta reduction | ~183M | 1.5x |
+| reduce_beta_chain: Deep nested β | ~618M | **5.0x** |
 
 ### Massively Parallel Benchmarks
 

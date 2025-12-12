@@ -1278,16 +1278,37 @@ fn run_benchmark() void {
     print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(sc_result.ns)) / 1_000_000.0});
     print("  Ops/sec: {d:.0}\n", .{sc_ops_sec});
 
-    // Calculate speedups
-    const serial_baseline = @as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0);
+    // =========================================================================
+    // COMPILED REDUCER BENCHMARKS
+    // =========================================================================
+
+    print("\n--- Compiled Reducer Benchmarks ---\n", .{});
+
+    // Benchmark 26: reduce_compiled - Direct-threaded dispatch
+    print("\n26. reduce_compiled: Beta reduction (100K ops):\n", .{});
+    const compiled_result = hvm.bench_compiled(iterations);
+    const compiled_ops_sec = @as(f64, @floatFromInt(compiled_result.ops)) / (@as(f64, @floatFromInt(compiled_result.ns)) / 1_000_000_000.0);
+    print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(compiled_result.ns)) / 1_000_000.0});
+    print("  Ops/sec: {d:.0}\n", .{compiled_ops_sec});
+
+    // Benchmark 27: reduce_beta_chain - Specialized pure beta reducer
+    print("\n27. reduce_beta_chain: Deep nested beta (10K, depth=10):\n", .{});
+    const beta_chain_result = hvm.bench_beta_chain(nested_iterations, depth);
+    const beta_chain_ops_sec = @as(f64, @floatFromInt(beta_chain_result.ops)) / (@as(f64, @floatFromInt(beta_chain_result.ns)) / 1_000_000_000.0);
+    print("  Time: {d:.2} ms\n", .{@as(f64, @floatFromInt(beta_chain_result.ns)) / 1_000_000.0});
+    print("  Ops/sec: {d:.0}\n", .{beta_chain_ops_sec});
+
+    // Calculate speedups (use benchmark 3 serial beta reduction as baseline)
     print("\n--- Performance Summary ---\n", .{});
-    print("Serial baseline: {d:.0} ops/sec\n", .{serial_baseline});
-    print("\nSpeedups vs serial:\n", .{});
-    print("  reduce_fast deep nested: {d:.1}x\n", .{fast_nested_ops / serial_baseline});
-    print("  Parallel beta: {d:.1}x\n", .{parallel_beta_ops_sec / serial_baseline});
-    print("  SIMD interactions: {d:.1}x\n", .{simd_int_ops_sec / serial_baseline});
-    print("  Pure parallel: {d:.1}x\n", .{parallel_pure_ops_sec / serial_baseline});
-    print("  Supercombinators: {d:.1}x\n", .{sc_ops_sec / serial_baseline});
+    print("Serial beta baseline: {d:.0} ops/sec\n", .{single_ops_sec});
+    print("\nSpeedups vs serial beta:\n", .{});
+    print("  reduce_fast deep nested: {d:.1}x\n", .{fast_nested_ops / single_ops_sec});
+    print("  reduce_compiled: {d:.1}x\n", .{compiled_ops_sec / single_ops_sec});
+    print("  reduce_beta_chain: {d:.1}x\n", .{beta_chain_ops_sec / single_ops_sec});
+    print("  Parallel beta: {d:.1}x\n", .{parallel_beta_ops_sec / single_ops_sec});
+    print("  SIMD interactions: {d:.1}x\n", .{simd_int_ops_sec / single_ops_sec});
+    print("  Pure parallel: {d:.1}x\n", .{parallel_pure_ops_sec / single_ops_sec});
+    print("  Supercombinators: {d:.1}x\n", .{sc_ops_sec / single_ops_sec});
 
     print("\n", .{});
     hvm.show_stats();
