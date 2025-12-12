@@ -150,7 +150,7 @@ Optimized following [VictorTaelin's IC techniques](https://gist.github.com/Victo
 | reduce_fast: Deep nested β | ~222M | **1.58x** |
 | reduce_fast: P02 arithmetic | ~135M | 1.0x |
 
-### Massively Parallel Benchmarks (100x+ speedup achieved)
+### Massively Parallel Benchmarks
 
 | Benchmark | Ops/sec | vs Serial |
 |-----------|---------|-----------|
