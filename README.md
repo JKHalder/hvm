@@ -9,7 +9,6 @@ A Zig implementation of [HVM3](https://github.com/HigherOrderCO/HVM3) - the High
 - Full arithmetic operators (+, -, *, /, %, ==, !=, <, >, &, |, ^, <<, >>)
 - Superpositions and duplications for optimal sharing
 - Parser for `.hvm` files
-- ~13 MIPS (million interactions per second)
 
 ## Building
 
