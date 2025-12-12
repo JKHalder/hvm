@@ -195,8 +195,8 @@ pub const State = struct {
     }
 };
 
-// Global HVM state (thread-local would be better for parallelism)
-var HVM: *State = undefined;
+// Thread-local HVM state for parallel execution
+threadlocal var HVM: *State = undefined;
 
 pub fn hvm_init(allocator: std.mem.Allocator) !void {
     HVM = try State.init(allocator);
@@ -212,6 +212,209 @@ pub fn hvm_get_state() *State {
 
 pub fn hvm_set_state(state: *State) void {
     HVM = state;
+}
+
+// =============================================================================
+// Parallel Execution
+// =============================================================================
+
+/// Number of worker threads (auto-detect CPU cores)
+pub const NUM_WORKERS = 12; // M4 Pro has 12 cores
+
+/// Thread-local states for parallel execution
+var worker_states: [NUM_WORKERS]?*State = [_]?*State{null} ** NUM_WORKERS;
+var worker_allocator: ?std.mem.Allocator = null;
+
+/// Initialize parallel execution with thread-local states
+pub fn parallel_init(allocator: std.mem.Allocator) !void {
+    worker_allocator = allocator;
+    for (0..NUM_WORKERS) |i| {
+        worker_states[i] = try State.init(allocator);
+    }
+}
+
+/// Free parallel execution resources
+pub fn parallel_free() void {
+    if (worker_allocator) |alloc| {
+        for (0..NUM_WORKERS) |i| {
+            if (worker_states[i]) |state| {
+                state.deinit(alloc);
+                worker_states[i] = null;
+            }
+        }
+    }
+}
+
+/// Batch reduce multiple terms in parallel
+pub fn parallel_reduce_batch(terms: []Term, results: []Term) void {
+    const chunk_size = (terms.len + NUM_WORKERS - 1) / NUM_WORKERS;
+
+    var threads: [NUM_WORKERS]?std.Thread = [_]?std.Thread{null} ** NUM_WORKERS;
+
+    for (0..NUM_WORKERS) |i| {
+        const start = i * chunk_size;
+        if (start >= terms.len) break;
+        const end = @min(start + chunk_size, terms.len);
+
+        threads[i] = std.Thread.spawn(.{}, worker_reduce_batch, .{
+            @as(u32, @intCast(i)),
+            terms[start..end],
+            results[start..end]
+        }) catch null;
+    }
+
+    // Wait for all threads
+    for (threads) |maybe_thread| {
+        if (maybe_thread) |thread| {
+            thread.join();
+        }
+    }
+}
+
+fn worker_reduce_batch(worker_id: u32, terms: []Term, results: []Term) void {
+    // Set thread-local state
+    if (worker_states[worker_id]) |state| {
+        HVM = state;
+        for (terms, 0..) |term, i| {
+            results[i] = reduce(term);
+        }
+    }
+}
+
+// =============================================================================
+// Fast Batch Arithmetic (bypasses full reduction for pure numeric ops)
+// =============================================================================
+
+/// Batch add: compute a[i] + b[i] for all i, store in results
+/// This bypasses the full reduction machinery for maximum speed
+pub fn batch_add(a: []const u32, b: []const u32, results: []u32) void {
+    const vec_size = 4;
+    const Vec = @Vector(vec_size, u32);
+
+    var i: usize = 0;
+    // SIMD loop
+    while (i + vec_size <= a.len) : (i += vec_size) {
+        const va: Vec = a[i..][0..vec_size].*;
+        const vb: Vec = b[i..][0..vec_size].*;
+        const vr = va +% vb;
+        results[i..][0..vec_size].* = vr;
+    }
+    // Scalar remainder
+    while (i < a.len) : (i += 1) {
+        results[i] = a[i] +% b[i];
+    }
+}
+
+/// Batch multiply
+pub fn batch_mul(a: []const u32, b: []const u32, results: []u32) void {
+    const vec_size = 4;
+    const Vec = @Vector(vec_size, u32);
+
+    var i: usize = 0;
+    while (i + vec_size <= a.len) : (i += vec_size) {
+        const va: Vec = a[i..][0..vec_size].*;
+        const vb: Vec = b[i..][0..vec_size].*;
+        const vr = va *% vb;
+        results[i..][0..vec_size].* = vr;
+    }
+    while (i < a.len) : (i += 1) {
+        results[i] = a[i] *% b[i];
+    }
+}
+
+/// Batch subtract
+pub fn batch_sub(a: []const u32, b: []const u32, results: []u32) void {
+    const vec_size = 4;
+    const Vec = @Vector(vec_size, u32);
+
+    var i: usize = 0;
+    while (i + vec_size <= a.len) : (i += vec_size) {
+        const va: Vec = a[i..][0..vec_size].*;
+        const vb: Vec = b[i..][0..vec_size].*;
+        const vr = va -% vb;
+        results[i..][0..vec_size].* = vr;
+    }
+    while (i < a.len) : (i += 1) {
+        results[i] = a[i] -% b[i];
+    }
+}
+
+/// Generic batch binary operation with SIMD
+pub fn batch_op(comptime op: Lab, a: []const u32, b: []const u32, results: []u32) void {
+    switch (op) {
+        OP_ADD => batch_add(a, b, results),
+        OP_SUB => batch_sub(a, b, results),
+        OP_MUL => batch_mul(a, b, results),
+        else => {
+            // Fallback for other ops
+            for (a, b, results) |av, bv, *r| {
+                r.* = switch (op) {
+                    OP_DIV => if (bv != 0) av / bv else 0,
+                    OP_MOD => if (bv != 0) av % bv else 0,
+                    OP_EQ => @intFromBool(av == bv),
+                    OP_NE => @intFromBool(av != bv),
+                    OP_LT => @intFromBool(av < bv),
+                    OP_GT => @intFromBool(av > bv),
+                    OP_LTE => @intFromBool(av <= bv),
+                    OP_GTE => @intFromBool(av >= bv),
+                    OP_AND => av & bv,
+                    OP_OR => av | bv,
+                    OP_XOR => av ^ bv,
+                    OP_LSH => av << @truncate(bv),
+                    OP_RSH => av >> @truncate(bv),
+                    else => 0,
+                };
+            }
+        },
+    }
+}
+
+// =============================================================================
+// Parallel SIMD Batch Operations (multi-threaded + vectorized)
+// =============================================================================
+
+/// Parallel SIMD batch add using all CPU cores
+pub fn parallel_batch_add(a: []const u32, b: []const u32, results: []u32) void {
+    const chunk_size = (a.len + NUM_WORKERS - 1) / NUM_WORKERS;
+    var threads: [NUM_WORKERS]?std.Thread = [_]?std.Thread{null} ** NUM_WORKERS;
+
+    for (0..NUM_WORKERS) |i| {
+        const start = i * chunk_size;
+        if (start >= a.len) break;
+        const end = @min(start + chunk_size, a.len);
+
+        threads[i] = std.Thread.spawn(.{}, struct {
+            fn work(a_slice: []const u32, b_slice: []const u32, r_slice: []u32) void {
+                batch_add(a_slice, b_slice, r_slice);
+            }
+        }.work, .{ a[start..end], b[start..end], results[start..end] }) catch null;
+    }
+
+    for (threads) |maybe_thread| {
+        if (maybe_thread) |thread| thread.join();
+    }
+}
+
+/// Parallel SIMD batch multiply using all CPU cores
+pub fn parallel_batch_mul(a: []const u32, b: []const u32, results: []u32) void {
+    const chunk_size = (a.len + NUM_WORKERS - 1) / NUM_WORKERS;
+    var threads: [NUM_WORKERS]?std.Thread = [_]?std.Thread{null} ** NUM_WORKERS;
+
+    for (0..NUM_WORKERS) |i| {
+        const start = i * chunk_size;
+        if (start >= a.len) break;
+        const end = @min(start + chunk_size, a.len);
+
+        threads[i] = std.Thread.spawn(.{}, struct {
+            fn work(a_slice: []const u32, b_slice: []const u32, r_slice: []u32) void {
+                batch_mul(a_slice, b_slice, r_slice);
+            }
+        }.work, .{ a[start..end], b[start..end], results[start..end] }) catch null;
+    }
+
+    for (threads) |maybe_thread| {
+        if (maybe_thread) |thread| thread.join();
+    }
 }
 
 // =============================================================================

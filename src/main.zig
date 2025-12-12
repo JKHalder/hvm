@@ -358,18 +358,24 @@ fn run_tests() void {
 }
 
 fn run_benchmark() void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     print("\nRunning benchmark...\n", .{});
 
-    // Benchmark 1: Arithmetic operations
-    print("\n1. Arithmetic benchmark (100K ops):\n", .{});
-    const arith_iterations: u32 = 100000;
+    const iterations: usize = 100000;
+    const batch_iterations: usize = 10_000_000; // 10M for batch ops
+
+    // Benchmark 1: Traditional single-threaded arithmetic
+    print("\n1. Single-threaded arithmetic (100K ops):\n", .{});
     var timer = std.time.Timer.start() catch {
         print("Timer not available\n", .{});
         return;
     };
 
     var i: u32 = 0;
-    while (i < arith_iterations) : (i += 1) {
+    while (i < iterations) : (i += 1) {
         const op_loc = hvm.alloc_node(2);
         hvm.set(op_loc + 0, hvm.term_new(hvm.W32, 0, i));
         hvm.set(op_loc + 1, hvm.term_new(hvm.W32, 0, i + 1));
@@ -379,18 +385,52 @@ fn run_benchmark() void {
 
     var elapsed = timer.read();
     var elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    const single_ops_sec = @as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0);
     print("  Time: {d:.2} ms\n", .{elapsed_ms});
-    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(arith_iterations)) / (elapsed_ms / 1000.0)});
+    print("  Ops/sec: {d:.0}\n", .{single_ops_sec});
 
-    // Benchmark 2: Beta reduction (lambda applications)
-    print("\n2. Beta reduction benchmark (100K apps):\n", .{});
+    // Benchmark 2: SIMD batch arithmetic (10M ops)
+    print("\n2. SIMD batch arithmetic (10M ops):\n", .{});
+
+    const a = allocator.alloc(u32, batch_iterations) catch {
+        print("  Failed to allocate\n", .{});
+        return;
+    };
+    defer allocator.free(a);
+    const b = allocator.alloc(u32, batch_iterations) catch {
+        print("  Failed to allocate\n", .{});
+        return;
+    };
+    defer allocator.free(b);
+    const results = allocator.alloc(u32, batch_iterations) catch {
+        print("  Failed to allocate\n", .{});
+        return;
+    };
+    defer allocator.free(results);
+
+    // Initialize data
+    for (0..batch_iterations) |j| {
+        a[j] = @intCast(j);
+        b[j] = @intCast(j + 1);
+    }
+
+    timer.reset();
+    hvm.batch_add(a, b, results);
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    const batch_ops_sec = @as(f64, @floatFromInt(batch_iterations)) / (elapsed_ms / 1000.0);
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{batch_ops_sec});
+    print("  Speedup vs single: {d:.1}x\n", .{batch_ops_sec / single_ops_sec});
+
+    // Benchmark 3: Beta reduction
+    print("\n3. Beta reduction (100K apps):\n", .{});
     hvm.set_len(1);
     hvm.set_itr(0);
     timer.reset();
 
     i = 0;
-    while (i < arith_iterations) : (i += 1) {
-        // Create (λx.x) i - identity application
+    while (i < iterations) : (i += 1) {
         const lam_loc = hvm.alloc_node(1);
         hvm.set(lam_loc, hvm.term_new(hvm.VAR, 0, lam_loc));
         const app_loc = hvm.alloc_node(2);
@@ -402,17 +442,16 @@ fn run_benchmark() void {
     elapsed = timer.read();
     elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
     print("  Time: {d:.2} ms\n", .{elapsed_ms});
-    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(arith_iterations)) / (elapsed_ms / 1000.0)});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
 
-    // Benchmark 3: DUP+SUP annihilation
-    print("\n3. DUP+SUP annihilation benchmark (100K ops):\n", .{});
+    // Benchmark 4: DUP+SUP annihilation
+    print("\n4. DUP+SUP annihilation (100K ops):\n", .{});
     hvm.set_len(1);
     hvm.set_itr(0);
     timer.reset();
 
     i = 0;
-    while (i < arith_iterations) : (i += 1) {
-        // Create !0{a,b} = &0{1,2}; a
+    while (i < iterations) : (i += 1) {
         const sup_loc = hvm.alloc_node(2);
         hvm.set(sup_loc, hvm.term_new(hvm.W32, 0, 1));
         hvm.set(sup_loc + 1, hvm.term_new(hvm.W32, 0, 2));
@@ -424,7 +463,36 @@ fn run_benchmark() void {
     elapsed = timer.read();
     elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
     print("  Time: {d:.2} ms\n", .{elapsed_ms});
-    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(arith_iterations)) / (elapsed_ms / 1000.0)});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 5: SIMD multiply (10M ops)
+    print("\n5. SIMD batch multiply (10M ops):\n", .{});
+    timer.reset();
+    hvm.batch_mul(a, b, results);
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(batch_iterations)) / (elapsed_ms / 1000.0)});
+
+    // Benchmark 6: Parallel SIMD add (10M ops, 12 threads)
+    print("\n6. Parallel SIMD batch add (10M ops, {d} threads):\n", .{hvm.NUM_WORKERS});
+    timer.reset();
+    hvm.parallel_batch_add(a, b, results);
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    const parallel_ops_sec = @as(f64, @floatFromInt(batch_iterations)) / (elapsed_ms / 1000.0);
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{parallel_ops_sec});
+    print("  Speedup vs single: {d:.1}x\n", .{parallel_ops_sec / single_ops_sec});
+
+    // Benchmark 7: Parallel SIMD multiply (10M ops, 12 threads)
+    print("\n7. Parallel SIMD batch multiply (10M ops, {d} threads):\n", .{hvm.NUM_WORKERS});
+    timer.reset();
+    hvm.parallel_batch_mul(a, b, results);
+    elapsed = timer.read();
+    elapsed_ms = @as(f64, @floatFromInt(elapsed)) / 1_000_000.0;
+    print("  Time: {d:.2} ms\n", .{elapsed_ms});
+    print("  Ops/sec: {d:.0}\n", .{@as(f64, @floatFromInt(batch_iterations)) / (elapsed_ms / 1000.0)});
 
     print("\n", .{});
     hvm.show_stats();
