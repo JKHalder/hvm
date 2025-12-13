@@ -313,50 +313,169 @@ pub const Compiler = struct {
     // =========================================================================
 
     fn compileStmts(self: *Compiler, stmts: []const ast.Stmt) CompileError!hvm.Term {
-        if (stmts.len == 0) {
+        return self.compileStmtsFrom(stmts, 0);
+    }
+
+    fn compileStmtsFrom(self: *Compiler, stmts: []const ast.Stmt, start_idx: usize) CompileError!hvm.Term {
+        if (start_idx >= stmts.len) {
             return hvm.term_new(hvm.ERA, 0, 0);
         }
 
-        // Find return statement and compile accordingly
-        for (stmts) |stmt| {
-            switch (stmt) {
-                .return_ => |ret| {
-                    if (ret.value) |value| {
-                        return self.compileExpr(value);
-                    }
-                    return hvm.term_new(hvm.ERA, 0, 0);
-                },
-                .assign => |assign| {
-                    // Compile value and bind
-                    const value = try self.compileExpr(assign.value);
-                    try self.bindPattern(assign.pattern, value);
-                },
-                .let_ => |let_| {
-                    const value = try self.compileExpr(let_.value);
-                    try self.bindPattern(let_.pattern, value);
-                },
-                .if_ => |if_stmt| {
-                    return self.compileIfStmt(&if_stmt);
-                },
-                .match_ => |match_stmt| {
-                    return self.compileMatchStmt(&match_stmt);
-                },
-                .switch_ => |switch_stmt| {
-                    return self.compileSwitchStmt(&switch_stmt);
-                },
-                .fold_ => |fold_stmt| {
-                    return self.compileFoldStmt(&fold_stmt);
-                },
-                .expr => |expr| {
-                    // Expression statement - just compile it
-                    _ = try self.compileExpr(expr);
-                },
-                else => {},
-            }
+        const stmt = stmts[start_idx];
+        switch (stmt) {
+            .return_ => |ret| {
+                if (ret.value) |value| {
+                    return self.compileExpr(value);
+                }
+                return hvm.term_new(hvm.ERA, 0, 0);
+            },
+            .assign => |assign| {
+                // Compile value
+                const value = try self.compileExpr(assign.value);
+                // Compile the rest as the continuation
+                return self.compilePatternBinding(assign.pattern, value, stmts, start_idx + 1);
+            },
+            .let_ => |let_| {
+                const value = try self.compileExpr(let_.value);
+                return self.compilePatternBinding(let_.pattern, value, stmts, start_idx + 1);
+            },
+            .if_ => |if_stmt| {
+                return self.compileIfStmt(&if_stmt);
+            },
+            .match_ => |match_stmt| {
+                return self.compileMatchStmt(&match_stmt);
+            },
+            .switch_ => |switch_stmt| {
+                return self.compileSwitchStmt(&switch_stmt);
+            },
+            .fold_ => |fold_stmt| {
+                return self.compileFoldStmt(&fold_stmt);
+            },
+            .expr => |expr| {
+                // Expression statement - compile and continue
+                _ = try self.compileExpr(expr);
+                return self.compileStmtsFrom(stmts, start_idx + 1);
+            },
+            else => {
+                return self.compileStmtsFrom(stmts, start_idx + 1);
+            },
         }
+    }
 
-        // No explicit return - return erasure
-        return hvm.term_new(hvm.ERA, 0, 0);
+    /// Compile pattern binding with continuation
+    fn compilePatternBinding(self: *Compiler, pattern: *const ast.Pattern, value: hvm.Term, stmts: []const ast.Stmt, next_idx: usize) CompileError!hvm.Term {
+        switch (pattern.kind) {
+            .var_ => |name| {
+                // Simple variable binding: create a lambda and apply
+                try self.pushScope();
+                defer self.popScope();
+
+                const lam_loc = hvm.alloc_node(1);
+                try self.bindVar(name, lam_loc);
+
+                const body = try self.compileStmtsFrom(stmts, next_idx);
+                hvm.set(lam_loc, body);
+
+                const lam = hvm.term_new(hvm.LAM, 0, @truncate(lam_loc));
+
+                // Apply the lambda to the value
+                const app_loc = hvm.alloc_node(2);
+                hvm.set(app_loc, lam);
+                hvm.set(app_loc + 1, value);
+                return hvm.term_new(hvm.APP, 0, @truncate(app_loc));
+            },
+            .wildcard => {
+                // Just continue with next statements
+                return self.compileStmtsFrom(stmts, next_idx);
+            },
+            .tuple => |pats| {
+                // Compile as MAT on the tuple constructor
+                // The tuple has constructor ID 0, arity = len(pats)
+                try self.pushScope();
+                defer self.popScope();
+
+                // Create lambdas for each tuple element
+                var lam_locs = try self.allocator.alloc(u64, pats.len);
+                defer self.allocator.free(lam_locs);
+
+                for (0..pats.len) |i| {
+                    lam_locs[i] = hvm.alloc_node(1);
+                }
+
+                // Bind pattern names to lambda locations
+                for (pats, 0..) |p, i| {
+                    if (p.kind == .var_) {
+                        try self.bindVar(p.kind.var_, lam_locs[i]);
+                    }
+                }
+
+                // Compile the continuation body
+                var body = try self.compileStmtsFrom(stmts, next_idx);
+
+                // Wrap in lambdas (innermost first)
+                var i: usize = pats.len;
+                while (i > 0) {
+                    i -= 1;
+                    hvm.set(lam_locs[i], body);
+                    body = hvm.term_new(hvm.LAM, 0, @truncate(lam_locs[i]));
+                }
+
+                // Create MAT node with one case (constructor ID 0)
+                const mat_loc = hvm.alloc_node(2);
+                hvm.set(mat_loc, value);
+                hvm.set(mat_loc + 1, body); // Case for constructor 0
+
+                return hvm.term_new(hvm.MAT, 1, @truncate(mat_loc));
+            },
+            .constructor => |ctor| {
+                // Similar to tuple but with named constructor
+                const info = self.ctors.get(ctor.name) orelse return CompileError.UndefinedConstructor;
+
+                try self.pushScope();
+                defer self.popScope();
+
+                var lam_locs = try self.allocator.alloc(u64, ctor.fields.len);
+                defer self.allocator.free(lam_locs);
+
+                for (0..ctor.fields.len) |i| {
+                    lam_locs[i] = hvm.alloc_node(1);
+                }
+
+                for (ctor.fields, 0..) |field, i| {
+                    if (field.pattern.kind == .var_) {
+                        try self.bindVar(field.pattern.kind.var_, lam_locs[i]);
+                    }
+                }
+
+                var body = try self.compileStmtsFrom(stmts, next_idx);
+
+                var j: usize = ctor.fields.len;
+                while (j > 0) {
+                    j -= 1;
+                    hvm.set(lam_locs[j], body);
+                    body = hvm.term_new(hvm.LAM, 0, @truncate(lam_locs[j]));
+                }
+
+                // MAT with case at constructor's index
+                const num_cases = info.id + 1;
+                const mat_loc = hvm.alloc_node(1 + num_cases);
+                hvm.set(mat_loc, value);
+
+                // Fill with erasures for missing cases
+                for (0..num_cases) |k| {
+                    if (k == info.id) {
+                        hvm.set(mat_loc + 1 + k, body);
+                    } else {
+                        hvm.set(mat_loc + 1 + k, hvm.term_new(hvm.ERA, 0, 0));
+                    }
+                }
+
+                return hvm.term_new(hvm.MAT, @intCast(num_cases), @truncate(mat_loc));
+            },
+            else => {
+                return self.compileStmtsFrom(stmts, next_idx);
+            },
+        }
     }
 
     fn compileIfStmt(self: *Compiler, if_stmt: *const ast.IfStmtPayload) CompileError!hvm.Term {

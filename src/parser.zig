@@ -944,7 +944,7 @@ fn prettyInto(allocator: Allocator, buf: *ArrayList(u8), term: hvm.Term) !void {
         },
         hvm.CO0 => try std.fmt.format(buf.writer(allocator), "CO0({d},{d})", .{ ext, val }),
         hvm.CO1 => try std.fmt.format(buf.writer(allocator), "CO1({d},{d})", .{ ext, val }),
-        hvm.VAR => try std.fmt.format(buf.writer(allocator), "VAR({d})", .{val}),
+        // VAR is handled in 'else' branch to follow substitutions
         hvm.REF => try std.fmt.format(buf.writer(allocator), "@{d}", .{ext}),
         hvm.P02, hvm.F_OP2 => {
             try buf.append(allocator, '(');
@@ -1034,6 +1034,15 @@ fn prettyInto(allocator: Allocator, buf: *ArrayList(u8), term: hvm.Term) !void {
             try prettyInto(allocator, buf, hvm.got(val + 1));
             try std.fmt.format(buf.writer(allocator), ", code={d}}}", .{ext});
         },
+        hvm.VAR => {
+            // Follow substitution if present
+            const subst = hvm.got(val);
+            if (hvm.term_is_sub(subst)) {
+                try prettyInto(allocator, buf, hvm.term_clr_sub(subst));
+            } else {
+                try std.fmt.format(buf.writer(allocator), "VAR({d})", .{val});
+            }
+        },
         else => {
             // Handle constructors C00-C15
             if (tag >= hvm.C00 and tag <= hvm.C15) {
@@ -1041,7 +1050,9 @@ fn prettyInto(allocator: Allocator, buf: *ArrayList(u8), term: hvm.Term) !void {
                 try std.fmt.format(buf.writer(allocator), "#C{d}{{", .{ext});
                 for (0..arity) |i| {
                     if (i > 0) try buf.append(allocator, ',');
-                    try prettyInto(allocator, buf, hvm.got(val + i));
+                    // Reduce field before printing to resolve VARs
+                    const field = hvm.reduce(hvm.got(val + i));
+                    try prettyInto(allocator, buf, field);
                 }
                 try buf.append(allocator, '}');
             } else {

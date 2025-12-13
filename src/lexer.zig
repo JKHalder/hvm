@@ -342,6 +342,22 @@ pub const Lexer = struct {
             return self.scanNat(start, start_line, start_col);
         }
 
+        // Check for standalone underscore (wildcard pattern)
+        if (c == '_') {
+            // If followed by identifier char, it's part of an identifier
+            if (self.peek()) |next| {
+                if (isIdentChar(next)) {
+                    return self.scanIdentifier(start, start_line, start_col, c);
+                }
+            }
+            // Otherwise it's a standalone underscore
+            return .{
+                .kind = .underscore,
+                .text = "_",
+                .span = self.currentSpan(start, start_line, start_col),
+            };
+        }
+
         // Identifier or keyword
         if (isIdentStart(c)) {
             return self.scanIdentifier(start, start_line, start_col, c);
