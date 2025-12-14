@@ -1,11 +1,11 @@
-# HVM4 (Zig)
+# HVM-Zig
 
-A Zig implementation of HVM4 - the Higher-Order Virtual Machine based on Interaction Calculus, with the new term layout, type system, and SupGen primitives.
+A Zig port inspired by HVM4 concepts - exploring the Higher-Order Virtual Machine based on Interaction Calculus, with the new term layout, type system, and SupGen primitives. This is an unofficial implementation for learning and experimentation purposes.
 
 ## Features
 
 ### Core Runtime
-- **HVM4 Architecture**: New 64-bit term layout `[8-bit tag][24-bit ext][32-bit val]`
+- **HVM4-style Architecture**: 64-bit term layout `[8-bit tag][24-bit ext][32-bit val]`
 - **50+ Term Types**: Constructors (C00-C15), primitives (P00-P15), stack frames, and more
 - **17 Numeric Primitives**: ADD, SUB, MUL, DIV, MOD, AND, OR, XOR, LSH, RSH, NOT, EQ, NE, LT, LE, GT, GE
 - **Optimal Duplication**: Label-based annihilation/commutation for optimal sharing
@@ -119,7 +119,7 @@ $ ./zig-out/bin/hvm4 eval "(* (+ #2 #3) (- #10 #4))"
 
 ## Architecture
 
-### Term Layout (HVM4)
+### Term Layout (HVM4-inspired)
 
 ```
 64-bit term: [8-bit tag][24-bit ext][32-bit val]
